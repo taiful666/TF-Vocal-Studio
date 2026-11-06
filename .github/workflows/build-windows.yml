@@ -29,27 +29,46 @@ jobs:
       - name: Build app and engine test (Release)
         run: cmake --build build --config Release --parallel
 
-      - name: Get bundled tools (pinned versions, SHA-256 verified)
+      - name: Download FFmpeg 8.0 (pinned, SHA-256 verified)
+        timeout-minutes: 8
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $ProgressPreference = "SilentlyContinue"
           New-Item -ItemType Directory -Force deps, bundle\models | Out-Null
-          function Get-Verified($url, $out, $sha) {
-            & curl.exe -sSfL --retry 3 --connect-timeout 30 -o $out $url
-            if ($LASTEXITCODE -ne 0) { throw "Download failed: $url" }
-            $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
-            if ($h -ne $sha) { throw "Checksum mismatch for $out ($h)" }
-          }
-          # FFmpeg 8.0 (Gyan.dev essentials build, GitHub mirror)
-          Get-Verified "https://github.com/GyanD/codexffmpeg/releases/download/8.0/ffmpeg-8.0-essentials_build.zip" deps\ff.zip "647e467caf82b9fa200a562769b5ff4d736aaf725804ed2c64ea9752106fa569"
-          # sherpa-onnx 2.0.1 (AI separation engine, Apache-2.0) + ONNX Runtime (MIT)
-          Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2" deps\so.tar.bz2 "dc703575a68594435f53dec93df775ff4913af851a196c0537163f21d8d2364e"
-          # UVR MDX-Net Inst HQ 3 model (music / voice separation)
-          Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_3.onnx" bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx "c207b845d51dc1303c543503f6f5a8b596da5d7de97bead77b3e16ec38e8d5b3"
+          & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o deps\ff.zip "https://github.com/GyanD/codexffmpeg/releases/download/8.0/ffmpeg-8.0-essentials_build.zip"
+          if ($LASTEXITCODE -ne 0) { throw "Download failed" }
+          $h = (Get-FileHash deps\ff.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "647e467caf82b9fa200a562769b5ff4d736aaf725804ed2c64ea9752106fa569") { throw "Checksum mismatch ($h)" }
+
+      - name: Download AI engine sherpa-onnx 2.0.1 (pinned, SHA-256 verified)
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o deps\so.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2"
+          if ($LASTEXITCODE -ne 0) { throw "Download failed" }
+          $h = (Get-FileHash deps\so.tar.bz2 -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "dc703575a68594435f53dec93df775ff4913af851a196c0537163f21d8d2364e") { throw "Checksum mismatch ($h)" }
+
+      - name: Download AI separation model (pinned, SHA-256 verified)
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_3.onnx"
+          if ($LASTEXITCODE -ne 0) { throw "Download failed" }
+          $h = (Get-FileHash bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "c207b845d51dc1303c543503f6f5a8b596da5d7de97bead77b3e16ec38e8d5b3") { throw "Checksum mismatch ($h)" }
+
+      - name: Unpack bundled tools
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
           & 7z x -y -odeps\ff deps\ff.zip "ffmpeg-8.0-essentials_build/bin/ffmpeg.exe" "ffmpeg-8.0-essentials_build/LICENSE" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Unzip failed" }
-          & tar -xjf deps\so.tar.bz2 -C deps
+          & 7z x -y -odeps deps\so.tar.bz2 | Out-Null
+          & 7z x -y -odeps deps\so.tar "sherpa-onnx-v2.0.1-win-x64-shared-MT-Release/lib/*.dll" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Untar failed" }
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe bundle\
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\LICENSE bundle\FFMPEG-LICENSE.txt
@@ -58,6 +77,7 @@ jobs:
           Get-ChildItem -Recurse bundle | Format-Table Name, Length
 
       - name: Run engine test (sync, effects, auto-tune, video, AI separation, CPU load)
+        timeout-minutes: 15
         shell: pwsh
         run: |
           $t = "build\TFEngineTest_artefacts\Release"
@@ -73,6 +93,7 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Install Inno Setup
+        timeout-minutes: 10
         run: choco install innosetup --no-progress -y
 
       - name: Make Setup.exe
