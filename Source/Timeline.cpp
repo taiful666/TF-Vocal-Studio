@@ -253,8 +253,8 @@ TimelineView::TimelineView (Project& p, AudioEngine& e) : project (p), engine (e
     addTrackBtn.onClick = [this] { auto id = project.addVocalTrack(); selectTrack (id); if (toast) toast (u8 ("নতুন কণ্ঠ ট্র্যাক যোগ হয়েছে")); };
     undoBtn.onClick = [this] { project.undo(); };
     redoBtn.onClick = [this] { project.redo(); };
-    zoomInBtn.onClick = [this] { zoomSlider.setValue (juce::jmin (400.0, pxPerSec * 1.5)); };
-    zoomOutBtn.onClick = [this] { zoomSlider.setValue (juce::jmax (4.0, pxPerSec / 1.5)); };
+    zoomInBtn.onClick = [this] { zoomSlider.setValue (juce::jmin (400.0, pxPerSec * 1.5), juce::sendNotificationSync); };
+    zoomOutBtn.onClick = [this] { zoomSlider.setValue (juce::jmax (4.0, pxPerSec / 1.5), juce::sendNotificationSync); };
     zoomSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     zoomSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     zoomSlider.setRange (4.0, 400.0, 0.0);
