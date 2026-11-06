@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 75
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -36,7 +36,8 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
           New-Item -ItemType Directory -Force deps, bundle\models | Out-Null
           function Get-Verified($url, $out, $sha) {
-            Invoke-WebRequest -Uri $url -OutFile $out
+            & curl.exe -sSfL --retry 3 --connect-timeout 30 -o $out $url
+            if ($LASTEXITCODE -ne 0) { throw "Download failed: $url" }
             $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
             if ($h -ne $sha) { throw "Checksum mismatch for $out ($h)" }
           }
@@ -46,8 +47,10 @@ jobs:
           Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2" deps\so.tar.bz2 "dc703575a68594435f53dec93df775ff4913af851a196c0537163f21d8d2364e"
           # UVR MDX-Net Inst HQ 3 model (music / voice separation)
           Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_3.onnx" bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx "c207b845d51dc1303c543503f6f5a8b596da5d7de97bead77b3e16ec38e8d5b3"
-          Expand-Archive deps\ff.zip deps\ff
-          tar -xjf deps\so.tar.bz2 -C deps
+          & 7z x -y -odeps\ff deps\ff.zip "ffmpeg-8.0-essentials_build/bin/ffmpeg.exe" "ffmpeg-8.0-essentials_build/LICENSE" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Unzip failed" }
+          & tar -xjf deps\so.tar.bz2 -C deps
+          if ($LASTEXITCODE -ne 0) { throw "Untar failed" }
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe bundle\
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\LICENSE bundle\FFMPEG-LICENSE.txt
           $so = "deps\sherpa-onnx-v2.0.1-win-x64-shared-MT-Release\lib"
