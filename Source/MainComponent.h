@@ -23,7 +23,7 @@ public:
     void openFile (const juce::File&);
     void showToast (const juce::String& text);
     bool canQuit() const { return ! engine.isRecording() && ! engine.isExporting() && ! studio.isBusy(); }
-    void stopEverything() { engine.stop(); }
+    void stopEverything() { studio.stopAndKeep(); }
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

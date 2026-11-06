@@ -74,6 +74,19 @@ namespace icons
     juce::Path search()       { return svg ("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-3.5-3.5"); }
     juce::Path sparkle()      { return svg ("M12 3l1.8 4.7L18.5 9l-4.7 1.8L12 15.5l-1.8-4.7L5.5 9l4.7-1.3z"); }
     juce::Path mic()          { return svg ("M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v3"); }
+    juce::Path speaker()      { return svg ("M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14"); }
+    juce::Path speakerOff()   { return svg ("M11 5L6 9H2v6h4l5 4z M22 9l-6 6 M16 9l6 6"); }
+    juce::Path scissors()     { return svg ("M6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M20 4L8.1 15.9 M14.5 14.5L20 20 M8.1 8.1L12 12"); }
+    juce::Path undo()         { return svg ("M9 14L4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-3"); }
+    juce::Path redo()         { return svg ("M15 14l5-5-5-5 M20 9H9a5 5 0 0 0 0 10h3"); }
+    juce::Path redo2()        { return redo(); }
+    juce::Path loop()         { return svg ("M17 2l4 4-4 4 M3 11v-1a4 4 0 0 1 4-4h14 M7 22l-4-4 4-4 M21 13v1a4 4 0 0 1-4 4H3"); }
+    juce::Path hand()         { return svg ("M18 11V6a2 2 0 0 0-4 0v1 M14 10V4a2 2 0 0 0-4 0v2 M10 10.5V6a2 2 0 0 0-4 0v8 M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-6-2.4l-3.6-3.6a2 2 0 0 1 2.8-2.8L7 15"); }
+    juce::Path cursor()       { return svg ("M4 4h4 M4 4v4 M20 4h-4 M20 4v4 M4 20h4 M4 20v-4 M20 20h-4 M20 20v-4 M9 12h6"); }
+    juce::Path zoomIn()       { return svg ("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-3.5-3.5 M11 8v6 M8 11h6"); }
+    juce::Path zoomOut()      { return svg ("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-3.5-3.5 M8 11h6"); }
+    juce::Path trash()        { return svg ("M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6 M10 11v6 M14 11v6"); }
+    juce::Path chevronDown()  { return svg ("M6 9l6 6 6-6"); }
     juce::Path wand()         { return svg ("M15 4V2 M15 16v-2 M8 9h2 M20 9h2 M17.8 11.8l1.4 1.4 M15 9h0 M17.8 6.2l1.4-1.4 M3 21l9-9 M12.2 6.2l-1.4-1.4"); }
 }
 
@@ -185,6 +198,42 @@ void TFLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int w, in
         g.setColour (col::accent);
         g.drawEllipse (knob.expanded (3.0f), 2.0f);
     }
+}
+
+void TFLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s)
+{
+    auto r = juce::Rectangle<float> ((float) x, (float) y, (float) w, (float) h).reduced (4.0f);
+    auto d = juce::jmin (r.getWidth(), r.getHeight());
+    auto c = r.getCentre();
+    const float rad = d * 0.5f;
+    const float stroke = juce::jmax (3.0f, d * 0.075f);
+
+    juce::Path bg; bg.addCentredArc (c.x, c.y, rad - stroke * 0.5f, rad - stroke * 0.5f, 0.0f, a0, a1, true);
+    g.setColour (col::border);
+    g.strokePath (bg, juce::PathStrokeType (stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    // bipolar knobs (pan) fill from the centre
+    const bool bipolar = s.getMinimum() < 0.0 && s.getMaximum() > 0.0;
+    const float zero = bipolar ? a0 + (a1 - a0) * (float) ((0.0 - s.getMinimum()) / (s.getMaximum() - s.getMinimum())) : a0;
+    const float ang = a0 + pos * (a1 - a0);
+    juce::Path fg; fg.addCentredArc (c.x, c.y, rad - stroke * 0.5f, rad - stroke * 0.5f, 0.0f, juce::jmin (zero, ang), juce::jmax (zero, ang), true);
+    g.setColour (s.isEnabled() ? col::accent : col::track);
+    g.strokePath (fg, juce::PathStrokeType (stroke, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+    // knob body
+    auto inner = juce::Rectangle<float> (d - stroke * 3.2f, d - stroke * 3.2f).withCentre (c);
+    juce::ColourGradient grad (juce::Colour (0xff2A2F3A), c.x, inner.getY(), juce::Colour (0xff1A1D24), c.x, inner.getBottom(), false);
+    g.setGradientFill (grad);
+    g.fillEllipse (inner);
+    g.setColour (juce::Colours::white.withAlpha (s.isMouseOverOrDragging() ? 0.14f : 0.07f));
+    g.drawEllipse (inner, 1.0f);
+    // pointer
+    const float pr = inner.getWidth() * 0.5f - 3.0f;
+    juce::Point<float> tip (c.x + pr * std::sin (ang), c.y - pr * std::cos (ang));
+    juce::Point<float> mid (c.x + pr * 0.45f * std::sin (ang), c.y - pr * 0.45f * std::cos (ang));
+    g.setColour (col::ink);
+    g.drawLine ({ mid, tip }, 2.2f);
+    if (s.hasKeyboardFocus (false)) { g.setColour (col::accent); g.drawEllipse (r.expanded (2.0f), 1.5f); }
 }
 
 void TFLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, const juce::Colour&, bool over, bool down)
@@ -365,12 +414,12 @@ void TFButton::paintButton (juce::Graphics& g, bool, bool)
 
     // content: icon + text (+ optional subtext for listRow)
     auto content = getLocalBounds().toFloat().reduced (style == Style::listRow ? 12.0f : 10.0f, 0.0f);
-    auto text = getButtonText();
+    auto label = getButtonText();
 
     if (style == Style::record)
     {
         juce::Rectangle<float> dot (0, 0, 18.0f, 18.0f);
-        auto textW = juce::GlyphArrangement::getStringWidth (font (fontPx, Weight::bold), text);
+        auto textW = juce::GlyphArrangement::getStringWidth (font (fontPx, Weight::bold), label);
         auto total = 18.0f + 10.0f + textW;
         dot.setCentre (content.getCentreX() - total * 0.5f + 9.0f, content.getCentreY());
         g.setColour (selected ? juce::Colours::white.withAlpha (0.35f) : col::rec.withAlpha (0.2f));
@@ -380,7 +429,7 @@ void TFButton::paintButton (juce::Graphics& g, bool, bool)
         if (selected) { g.setColour (juce::Colours::white); g.fillEllipse (dot.reduced (5.0f)); }
         g.setColour (fg);
         g.setFont (font (fontPx, Weight::bold));
-        g.drawText (text, juce::Rectangle<float> (dot.getRight() + 10.0f, content.getY(), textW + 4.0f, content.getHeight()), juce::Justification::centredLeft, false);
+        g.drawText (label, juce::Rectangle<float> (dot.getRight() + 10.0f, content.getY(), textW + 4.0f, content.getHeight()), juce::Justification::centredLeft, false);
     }
     else if (style == Style::listRow)
     {
@@ -389,7 +438,7 @@ void TFButton::paintButton (juce::Graphics& g, bool, bool)
         auto top = content.withTrimmedTop (subText.isEmpty() ? 0.0f : 6.0f).removeFromTop (subText.isEmpty() ? content.getHeight() : 22.0f);
         g.setColour (fg);
         g.setFont (font (15.0f, Weight::semibold));
-        g.drawText (text, top, subText.isEmpty() ? juce::Justification::centredLeft : juce::Justification::bottomLeft, true);
+        g.drawText (label, top, subText.isEmpty() ? juce::Justification::centredLeft : juce::Justification::bottomLeft, true);
         if (subText.isNotEmpty())
         {
             g.setColour (col::muted);
@@ -401,24 +450,24 @@ void TFButton::paintButton (juce::Graphics& g, bool, bool)
     {
         g.setFont (font (fontPx, style == Style::segment || style == Style::accent ? Weight::semibold : Weight::medium));
         auto hasIcon = ! icon.isEmpty();
-        auto hasText = text.isNotEmpty() && ! getProperties().getWithDefault ("iconOnly", false);
+        auto hasText = label.isNotEmpty() && ! getProperties().getWithDefault ("iconOnly", false);
         if (hasIcon && ! hasText)
         {
             drawIcon (g, icon, content.withSizeKeepingCentre (iconPx, iconPx), fg, iconFilled, 2.0f);
         }
         else if (hasIcon)
         {
-            auto tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text);
+            auto tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), label);
             auto total = iconPx + 8.0f + tw;
             auto x = content.getCentreX() - total * 0.5f;
             drawIcon (g, icon, { x, content.getCentreY() - iconPx * 0.5f, iconPx, iconPx }, fg, iconFilled, 2.0f);
             g.setColour (fg);
-            g.drawText (text, juce::Rectangle<float> (x + iconPx + 8.0f, content.getY(), tw + 4.0f, content.getHeight()), juce::Justification::centredLeft, false);
+            g.drawText (label, juce::Rectangle<float> (x + iconPx + 8.0f, content.getY(), tw + 4.0f, content.getHeight()), juce::Justification::centredLeft, false);
         }
         else
         {
             g.setColour (fg);
-            g.drawFittedText (text, content.toNearestInt(), juce::Justification::centred, 1);
+            g.drawFittedText (label, content.toNearestInt(), juce::Justification::centred, 1);
         }
     }
 
@@ -458,6 +507,43 @@ void TFSwitch::paintButton (juce::Graphics& g, bool over, bool)
         g.setColour (col::accent);
         g.drawRoundedRectangle (r.expanded (2.0f), r.getHeight() * 0.5f + 2.0f, 2.0f);
     }
+}
+
+//==============================================================================
+Knob::Knob (const juce::String& n, double min, double max, double def, std::function<juce::String (double)> fmt)
+    : name (n), format (std::move (fmt))
+{
+    slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+    slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    slider.setRange (min, max, 0.0);
+    slider.setValue (def, juce::dontSendNotification);
+    slider.setDoubleClickReturnValue (true, def);
+    slider.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
+    slider.setMouseDragSensitivity (220);
+    slider.setVelocityBasedMode (false);
+    slider.setTitle (n);
+    slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    slider.onValueChange = [this] { repaint(); if (onChange) onChange (slider.getValue()); };
+    addAndMakeVisible (slider);
+}
+
+void Knob::resized()
+{
+    auto r = getLocalBounds();
+    r.removeFromBottom (36);
+    slider.setBounds (r.withSizeKeepingCentre (juce::jmin (r.getWidth(), r.getHeight()), juce::jmin (r.getWidth(), r.getHeight())));
+}
+
+void Knob::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds();
+    auto bottom = r.removeFromBottom (36);
+    g.setColour (col::ink);
+    g.setFont (font (13.5f, Weight::semibold));
+    g.drawText (format ? format (slider.getValue()) : juce::String(), bottom.removeFromTop (18), juce::Justification::centred);
+    g.setColour (col::muted);
+    g.setFont (font (12.5f));
+    g.drawText (name, bottom, juce::Justification::centredTop, true);
 }
 
 //==============================================================================

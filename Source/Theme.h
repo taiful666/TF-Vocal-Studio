@@ -65,6 +65,19 @@ namespace icons
     juce::Path sparkle();
     juce::Path mic();
     juce::Path wand();
+    juce::Path speaker();
+    juce::Path speakerOff();
+    juce::Path scissors();
+    juce::Path undo();
+    juce::Path redo();
+    juce::Path loop();
+    juce::Path hand();
+    juce::Path cursor();
+    juce::Path zoomIn();
+    juce::Path zoomOut();
+    juce::Path trash();
+    juce::Path chevronDown();
+    juce::Path redo2();
 }
 
 /** Draw a 24x24-viewBox icon path into area, stroked (line icons) or filled. */
@@ -95,6 +108,7 @@ public:
 
     void drawLinearSlider (juce::Graphics&, int x, int y, int w, int h, float pos, float minPos, float maxPos,
                            juce::Slider::SliderStyle, juce::Slider&) override;
+    void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle, juce::Slider&) override;
     int getSliderThumbRadius (juce::Slider&) override { return 8; }
 
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool over, bool down) override;
@@ -161,6 +175,7 @@ public:
     TFSwitch() { setClickingTogglesState (true); setWantsKeyboardFocus (true); setMouseClickGrabsKeyboardFocus (false); setMouseCursor (juce::MouseCursor::PointingHandCursor); }
     void paintButton (juce::Graphics&, bool over, bool down) override;
 private:
+    using juce::ToggleButton::clicked;
     void clicked() override { startTimerHz (60); }
     void timerCallback() override;
     float knob = -1.0f;
@@ -177,6 +192,22 @@ public:
         g.setColour (col::panel);  g.fillRoundedRectangle (r, 18.0f);
         g.setColour (col::border); g.drawRoundedRectangle (r, 18.0f, 1.0f);
     }
+};
+
+//==============================================================================
+/** Professional rotary knob with its name under it and the value inside the ring. */
+class Knob : public juce::Component
+{
+public:
+    Knob (const juce::String& name, double min, double max, double def, std::function<juce::String (double)> fmt);
+    juce::Slider slider;
+    std::function<void (double)> onChange;
+    void resized() override;
+    void paint (juce::Graphics&) override;
+    void setValue (double v) { slider.setValue (v, juce::dontSendNotification); repaint(); }
+private:
+    juce::String name;
+    std::function<juce::String (double)> format;
 };
 
 //==============================================================================

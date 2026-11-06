@@ -11,6 +11,8 @@ namespace media
 {
     juce::File ffmpeg();                         // bundled next to the app (or on PATH while developing)
     bool isVideo (const juce::File&);
+    /** A clean name for showing a song (download-site prefixes, ids and underscores removed). */
+    juce::String displayName (const juce::File&);
     juce::String audioExtensions();              // "mp3;wav;..."
     juce::String videoExtensions();
     juce::String allPatterns();                  // "*.mp3;*.mp4;..." for file choosers
@@ -25,6 +27,9 @@ namespace media
     /** Converts any media file to a 48 kHz stereo WAV. progress 0..1. Returns error text or empty on success. */
     juce::String extractAudio (const juce::File& in, const juce::File& outWav, double sampleRate,
                                std::function<void (float)> progress, std::atomic<bool>& cancel);
+
+    /** Encodes a WAV as a high-quality MP3 (320 kbps) for sharing. Returns error text or empty on success. */
+    juce::String encodeMp3 (const juce::File& wav, const juce::File& mp3);
 }
 
 //==============================================================================

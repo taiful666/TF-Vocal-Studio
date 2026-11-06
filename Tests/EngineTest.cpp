@@ -7,7 +7,10 @@
 #include "Lyrics.h"
 #include "VocalFx.h"
 #include "Media.h"
+#include "Project.h"
+#include "Stretch.h"
 #include <juce_events/juce_events.h>
+#include <random>
 
 using namespace tf;
 
@@ -26,6 +29,11 @@ struct FakeDevice : public juce::AudioIODevice, private juce::Thread
     std::atomic<double> totalCallbackMs { 0 }, maxCallbackMs { 0 };
     std::atomic<int> callbacks { 0 };
     std::atomic<float> extraNoise { 0.0f };
+    // output capture: what the speaker plays, with the engine position at the first captured sample
+    std::function<double()> positionProbe;
+    std::atomic<bool> capture { false };
+    std::vector<float> captured;
+    double captureStartPos = -1.0;
 
     FakeDevice() : AudioIODevice ("Fake", "Fake"), Thread ("fake audio") { outHistory.assign (1 << 22, 0.0f); }
     ~FakeDevice() override { close(); }
@@ -63,20 +71,30 @@ struct FakeDevice : public juce::AudioIODevice, private juce::Thread
     void run() override
     {
         juce::AudioBuffer<float> in (1, bs), out (2, bs);
-        juce::Random rnd (1);
+        std::mt19937 rng (12345);
+        std::uniform_real_distribution<float> uni (-1.0f, 1.0f);
+        float p0 = 0, p1 = 0, p2 = 0;   // pink noise (like a fan or AC), not a pure test hiss
         auto next = juce::Time::getMillisecondCounterHiRes();
         const double period = 1000.0 * bs / sr;
         while (! threadShouldExit())
         {
             auto* inp = in.getWritePointer (0);
+            auto pink = [&]
+            {
+                const float w = uni (rng);
+                p0 = 0.99765f * p0 + w * 0.0990460f; p1 = 0.96300f * p1 + w * 0.2965164f; p2 = 0.57000f * p2 + w * 1.0526913f;
+                return 0.25f * (p0 + p1 + p2 + w * 0.1848f);
+            };
             for (int i = 0; i < bs; ++i)
             {
                 auto idx = written + i - loopDelay;
                 inp[i] = (idx >= 0 ? outHistory[(size_t) idx % outHistory.size()] : 0.0f)
-                       + extraNoise.load() * (rnd.nextFloat() * 2.0f - 1.0f);
+                       + extraNoise.load() * pink();
             }
             const float* ins[] = { inp };
             float* outs[] = { out.getWritePointer (0), out.getWritePointer (1) };
+            const bool cap = capture.load();
+            if (cap && captureStartPos < 0 && positionProbe) captureStartPos = positionProbe();
             auto t0 = juce::Time::getMillisecondCounterHiRes();
             cb->audioDeviceIOCallbackWithContext (ins, 1, outs, 2, bs, {});
             auto dt = juce::Time::getMillisecondCounterHiRes() - t0;
@@ -85,6 +103,8 @@ struct FakeDevice : public juce::AudioIODevice, private juce::Thread
             ++callbacks;
             for (int i = 0; i < bs; ++i)
                 outHistory[(size_t) (written + i) % outHistory.size()] = 0.5f * (outs[0][i] + outs[1][i]);
+            if (cap && captureStartPos >= 0 && captured.size() < 48000 * 30)
+                for (int i = 0; i < bs; ++i) captured.push_back (0.5f * (outs[0][i] + outs[1][i]));
             written += bs;
 
             next += period;
@@ -323,6 +343,7 @@ static void testMedia (const juce::File& tmp, const juce::File& song)
 int main()
 {
     juce::ScopedJuceInitialiser_GUI init;
+    const auto testStart = juce::Time::getCurrentTime() - juce::RelativeTime::seconds (2);
     auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("tfvs_test");
     tmp.deleteRecursively(); tmp.createDirectory();
 
@@ -339,6 +360,31 @@ int main()
     }
 
     testEffects();
+
+    std::cout << "\nAI noise removal (offline)\n";
+    {
+        NoiseSuppressor ns;
+        juce::Random rnd (3);
+        std::vector<float> x (48000 * 4);
+        for (auto& v : x) v = 0.05f * (rnd.nextFloat() * 2.0f - 1.0f);
+        auto y = x;
+        for (size_t i = 0; i < y.size(); i += 128) ns.process (y.data() + i, (int) juce::jmin ((size_t) 128, y.size() - i), 1.0f);
+        std::vector<float> a (x.begin() + 48000, x.begin() + 96000), b (y.begin() + 48000, y.begin() + 96000);
+        auto db = juce::Decibels::gainToDecibels ((float) (rms (b) / rms (a)));
+        CHECK (db < -15.0f, "white hiss reduced by " + juce::String (-db, 1) + " dB (offline)");
+        double sumDb = 0;
+        for (int seed = 10; seed < 16; ++seed)
+        {
+            std::mt19937 g ((unsigned) seed); std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+            NoiseSuppressor n2; std::vector<float> xx (48000 * 6);
+            float p0 = 0, p1 = 0, p2 = 0;
+            for (auto& v : xx) { const float w = u (g); p0 = 0.99765f * p0 + w * 0.0990460f; p1 = 0.96300f * p1 + w * 0.2965164f; p2 = 0.57000f * p2 + w * 1.0526913f; v = 0.012f * (p0 + p1 + p2 + w * 0.1848f); }
+            auto yy = xx; for (size_t i = 0; i < yy.size(); i += 128) n2.process (yy.data() + i, 128, 1.0f);
+            std::vector<float> a2 (xx.begin() + 144000, xx.end()), b2 (yy.begin() + 144000, yy.end());
+            sumDb += juce::Decibels::gainToDecibels ((float) (rms (b2) / rms (a2)));
+        }
+        CHECK (sumDb / 6.0 < -12.0, "fan-like noise reduced by " + juce::String (-sumDb / 6.0, 1) + " dB on average (offline, 6 noises)");
+    }
 
     // ---- 2. test song: 48 kHz stereo, rich content for correlation
     auto song = tmp.getChildFile ("song.wav");
@@ -372,173 +418,307 @@ int main()
     CHECK (engine.noiseAvailable(), "48 kHz -> AI noise removal available");
     CHECK (engine.getRoundTripLatencySamples() == FakeDevice::loopDelay, "round-trip latency read from device");
 
+    auto* dev = dynamic_cast<FakeDevice*> (engine.getDeviceManager().getCurrentAudioDevice());
+    dev->positionProbe = [&engine] { return engine.getPosition(); };
     juce::String err;
-    CHECK (engine.loadSong (song, err), "song loads");
-    engine.setMonitorEnabled (false);   // no vocal feedback in the loopback test
-    engine.setMusicVolume (1.0f);
-    engine.setVoiceVolume (1.0f);
+    engine.setMonitorEnabled (false);   // no live-mic feedback in the loopback test
 
-    // ---- 3. recording WITHOUT noise removal: vocal must line up exactly with the song
+    // ---- project: music track + one voice track, neutral voice effects for exact comparisons
+    std::cout << "\nProject\n";
+    Project project;
+    project.newProject ("engine test");
+    const auto musicId = project.addMusic (song, song, 20.0);
+    juce::String voiceId;
+    for (auto& t : project.state().tracks) if (t.kind == TrackKind::vocal) voiceId = t.id;
+    {
+        auto* m = project.state().musicTrack();
+        CHECK (m != nullptr && project.state().tracks.size() == 2 && project.state().tracks.getReference (0).id == musicId, "music track first, one voice track");
+        CHECK (std::abs (project.state().length() - 20.0) < 1e-6, "project length = music length");
+        FxParams neutral;
+        for (int i = 0; i < FxParams::numSwitches; ++i) neutral.setOn ((FxParams::Switch) i, false);
+        neutral.set (FxParams::tuneAmt, 0.0f);
+        auto v = project.state().tracks.getReference (project.state().indexOf (voiceId));
+        v.fx = neutral.toString();
+        v.gain = 1.0f;
+        project.setTrack (v, false);
+        auto mt = *m; mt.gain = 1.0f; project.setTrack (mt, false);
+    }
+    engine.setProject (project.state());
+    engine.setArmedTrack (voiceId);
+    pump (200);
+    CHECK (std::abs (engine.getLength() - 20.0) < 1e-6 && engine.hasContent(), "engine loaded the project");
+
+    auto finishRecording = [&]() -> AudioEngine::RecordingResult
+    {
+        engine.stopRecording();
+        pump (200);
+        auto r = engine.takeLastRecording();
+        if (r.ok) { project.insertRecording (r.trackId, r.wav, r.start, r.in, r.out); engine.setProject (project.state()); }
+        return r;
+    };
+
+    // ---- recording into the voice track WITHOUT noise removal: must line up exactly with the music
     std::cout << "\nRecording alignment (noise removal off)\n";
     engine.setNoiseEnabled (false);
     engine.setPosition (2.0);
     pump (200);
-    CHECK (engine.startRecording (err), "recording starts");
+    CHECK (engine.startRecording (voiceId, {}, err), "recording into the voice track starts");
     pump (4000);
-    engine.stopRecording();
-    pump (200);
-    auto take = engine.getLastTake();
-    CHECK (take.isValid() && take.folder.getChildFile ("session.xml").existsAsFile(), "take saved with session.xml");
-    CHECK (std::abs (take.lengthSeconds - 4.0) < 0.3, "take length ~4 s (" + juce::String (take.lengthSeconds, 2) + " s)");
-    CHECK (take.vocalOffset == FakeDevice::loopDelay, "vocal offset = latency (" + juce::String (take.vocalOffset) + ")");
-
+    auto rec1 = finishRecording();
+    CHECK (rec1.ok && rec1.trackId == voiceId, "recording result for the voice track");
+    CHECK (std::abs (rec1.start - 2.0) < 0.01, "clip starts where recording started (" + juce::String (rec1.start, 3) + " s)");
+    CHECK (std::abs (rec1.in * 48000.0 - FakeDevice::loopDelay) < 0.5, "latency head skipped (" + juce::String (rec1.in * 48000.0, 1) + " samples)");
+    CHECK (std::abs ((rec1.out - rec1.in) - 4.0) < 0.3, "clip length ~4 s");
     {
-        auto vocal = readMono (take.vocal, take.vocalOffset, 48000 * 2);
-        auto ref = readMono (song, (juce::int64) std::llround (take.startSeconds * 48000), 48000 * 2);
+        auto vocal = readMono (rec1.wav, (juce::int64) std::llround (rec1.in * 48000), 48000 * 2);
+        auto ref = readMono (song, (juce::int64) std::llround (rec1.start * 48000), 48000 * 2);
         double c = 0;
         auto lag = bestLag (vocal, ref, 600, c);
-        CHECK (std::abs (lag) <= 1, "recorded vocal aligned with song (lag " + juce::String (lag) + " samples, corr " + juce::String (c, 3) + ")");
-        for (int w = 0; w < 3; ++w)
-        {
-            auto v2 = readMono (take.vocal, take.vocalOffset + w * 48000, 48000);
-            auto r2 = readMono (song, (juce::int64) std::llround (take.startSeconds * 48000) + w * 48000, 48000);
-            double c2 = 0; auto l2 = bestLag (v2, r2, 600, c2);
-            auto rw = readMono (take.raw, take.rawOffset + w * 48000, 48000);
-            double c3 = 0; auto l3 = bestLag (rw, r2, 600, c3);
-            std::cout << "        window " << w << ": lag " << l2 << " corr " << juce::String (c2, 3) << " | raw lag " << l3 << " corr " << juce::String (c3, 3)
-                      << " | rms vocal " << rms (v2) << " ref " << rms (r2) << "\n";
-        }
+        CHECK (std::abs (lag) <= 1, "recorded vocal aligned with the music (lag " + juce::String (lag) + " samples, corr " + juce::String (c, 3) + ")");
     }
-
-    // ---- 4. recording WITH noise removal: +480 samples compensated
-    std::cout << "\nRecording alignment (AI noise removal on)\n";
-    engine.setNoiseEnabled (true);
-    engine.setNoiseAmount (1.0f);
-    engine.setPosition (5.0);
-    pump (200);
-    CHECK (engine.startRecording (err), "recording starts");
-    pump (4000);
-    engine.stopRecording();
-    pump (200);
-    auto take2 = engine.getLastTake();
-    CHECK (take2.vocalOffset == FakeDevice::loopDelay + NoiseSuppressor::frameSize, "vocal offset includes RNNoise frame");
     {
-        auto raw = readMono (take2.raw, take2.rawOffset, 48000 * 2);
-        auto ref = readMono (song, (juce::int64) std::llround (take2.startSeconds * 48000), 48000 * 2);
-        double c = 0;
-        auto lag = bestLag (raw, ref, 600, c);
-        CHECK (std::abs (lag) <= 1, "raw vocal aligned (lag " + juce::String (lag) + ")");
+        auto& v = project.state().tracks.getReference (project.state().indexOf (voiceId));
+        CHECK (v.clips.size() == 1, "clip placed on the voice track");
     }
 
-    // ---- 5. noise suppression actually removes steady noise (silence + hiss input)
-    std::cout << "\nAI noise removal\n";
+    // ---- THE KEY CHECK: after recording, playback plays the voice (aligned) together with the music
+    std::cout << "\nPlayback after recording: voice + music together\n";
+    auto capturePlayback = [&] (double from, int ms) -> std::pair<std::vector<float>, double>
+    {
+        engine.setPosition (from);
+        pump (300);
+        dev->captured.clear(); dev->captureStartPos = -1.0;
+        dev->capture = true;
+        engine.play();
+        pump (ms);
+        dev->capture = false;
+        engine.pause();
+        pump (100);
+        return { dev->captured, dev->captureStartPos };
+    };
+    {
+        // voice alone (music muted)
+        auto m = *project.state().musicTrack(); m.mute = true; project.setTrack (m, false); engine.setProject (project.state());
+        auto [out, pos] = capturePlayback (2.5, 2500);
+        auto ref = readMono (song, (juce::int64) std::llround (pos * 48000), (juce::int64) out.size());
+        double c = 0;
+        const int n = (int) juce::jmin ((size_t) 48000 * 2, out.size());
+        std::vector<float> o2 (out.begin(), out.begin() + n), r2 (ref.begin(), ref.begin() + n);
+        auto lag = bestLag (o2, r2, 600, c);
+        const double level = rms (o2) / juce::jmax (1e-9, rms (r2));
+        CHECK (level > 0.5, "recorded voice is heard on playback (level " + juce::String (level, 2) + "x)");
+        CHECK (std::abs (lag) <= 2 && c > 0.8, "voice plays in time on playback (lag " + juce::String (lag) + ", corr " + juce::String (c, 3) + ")");
+
+        // voice + music
+        m.mute = false; project.setTrack (m, false); engine.setProject (project.state());
+        auto [out2, pos2] = capturePlayback (2.5, 2500);
+        auto ref2 = readMono (song, (juce::int64) std::llround (pos2 * 48000), (juce::int64) out2.size());
+        const int n2 = (int) juce::jmin ((size_t) 48000 * 2, out2.size());
+        std::vector<float> o3 (out2.begin(), out2.begin() + n2), r3 (ref2.begin(), ref2.begin() + n2);
+        const double both = rms (o3) / juce::jmax (1e-9, rms (r3));
+        CHECK (both > 1.6, "music + voice play together (level " + juce::String (both, 2) + "x of music alone)");
+
+        // mute the voice: only the music is left
+        auto v = project.state().tracks.getReference (project.state().indexOf (voiceId)); v.mute = true; project.setTrack (v, false); engine.setProject (project.state());
+        auto [out3, pos3] = capturePlayback (2.5, 1500);
+        auto ref3 = readMono (song, (juce::int64) std::llround (pos3 * 48000), (juce::int64) out3.size());
+        const double only = rms (out3) / juce::jmax (1e-9, rms (ref3));
+        CHECK (only > 0.8 && only < 1.25, "voice mute works (level " + juce::String (only, 2) + "x)");
+        v.mute = false; project.setTrack (v, false); engine.setProject (project.state());
+    }
+
+    // ---- sing a part again (punch-in): only the chosen part is replaced
+    std::cout << "\nSing a part again (punch-in)\n";
+    {
+        engine.setPrerollSeconds (1.0);
+        CHECK (engine.startRecording (voiceId, { 3.0, 4.0 }, err), "punch recording starts (1 s cue before)");
+        for (int i = 0; i < 60 && ! engine.punchFinished(); ++i) pump (100);
+        CHECK (engine.punchFinished(), "punch ends by itself at the end of the part");
+        auto r = finishRecording();
+        CHECK (r.ok && std::abs (r.start - 3.0) < 0.01 && std::abs ((r.out - r.in) - 1.0) < 0.01, "new clip covers exactly 3.0-4.0 s");
+        auto& v = project.state().tracks.getReference (project.state().indexOf (voiceId));
+        juce::String layout;
+        for (auto& c : v.clips) layout << juce::String (c.start, 2) << "-" << juce::String (c.end(), 2) << " ";
+        CHECK (v.clips.size() == 3, "old take split around the new part: " + layout);
+        auto vocal = readMono (r.wav, (juce::int64) std::llround (r.in * 48000), 48000 / 2);
+        auto ref = readMono (song, (juce::int64) std::llround (r.start * 48000), 48000 / 2);
+        double c = 0; auto lag = bestLag (vocal, ref, 600, c);
+        CHECK (std::abs (lag) <= 1, "punch-in aligned (lag " + juce::String (lag) + ")");
+        engine.setPrerollSeconds (2.0);
+    }
+
+    // ---- editing: cut, move, undo, save/load
+    std::cout << "\nEditing\n";
+    {
+        const auto before = projectToXml (project.state());
+        project.deleteRange (voiceId, { 2.5, 3.5 });
+        auto cnt = project.state().tracks.getReference (project.state().indexOf (voiceId)).clips.size();
+        CHECK (cnt == 3, "cut a part out of the voice track");
+        project.undo();
+        CHECK (projectToXml (project.state()) == before, "undo restores the exact state");
+        project.redo(); project.undo();
+        auto& v = project.state().tracks.getReference (project.state().indexOf (voiceId));
+        const auto clipId = v.clips.getReference (0).id;
+        project.moveClip (voiceId, clipId, 1.5);
+        bool moved = false;
+        for (auto& c : project.state().tracks.getReference (project.state().indexOf (voiceId)).clips) if (c.id == clipId) moved = std::abs (c.start - 1.5) < 1e-9;
+        CHECK (moved, "voice clip moved earlier");
+        project.undo();
+        ProjectState back;
+        CHECK (projectFromXml (projectToXml (project.state()), back) && projectToXml (back) == projectToXml (project.state()), "project saves and loads identically");
+        engine.setProject (project.state());
+    }
+
+    // ---- AI noise removal on a free recording (no music)
+    std::cout << "\nAI noise removal (singing without music)\n";
     {
         engine.stop();
-        engine.unloadSong();
-        auto* dev = dynamic_cast<FakeDevice*> (engine.getDeviceManager().getCurrentAudioDevice());
+        Project free;
+        free.newProject ("free");
+        juce::String fv;
+        for (auto& t : free.state().tracks) fv = t.id;
+        engine.setProject (free.state());
         dev->extraNoise = 0.05f;
+        engine.setNoiseEnabled (true);
         engine.setNoiseAmount (1.0f);
-        CHECK (engine.startRecording (err), "free recording (no song) starts");
+        engine.setPosition (0.0);
+        pump (3000);   // in the app noise removal is on from the start, so it has always settled
+        CHECK (engine.startRecording (fv, {}, err), "free recording (no music) starts");
         pump (3000);
         engine.stopRecording();
         pump (200);
         dev->extraNoise = 0.0f;
-        auto t = engine.getLastTake();
-        auto v = readMono (t.vocal, t.vocalOffset + 48000);   // skip first second (model settling)
-        auto r = readMono (t.raw, t.rawOffset + 48000);
-        auto db = juce::Decibels::gainToDecibels ((float) (rms (v) / juce::jmax (1e-9, rms (r))));
-        CHECK (db < -15.0f, "hiss reduced by " + juce::String (-db, 1) + " dB");
-        CHECK (! t.backing.existsAsFile() && std::abs (t.startSeconds) < 1e-9, "free recording has no backing");
+        auto r = engine.takeLastRecording();
+        CHECK (r.ok && std::abs (r.start) < 1e-6, "free recording placed at 0 s");
+        CHECK (std::abs (r.in * 48000.0 - (FakeDevice::loopDelay + NoiseSuppressor::frameSize)) < 0.5, "noise removal delay compensated");
+        auto take = Take::load (r.wav.getParentDirectory());
+        auto v = readMono (r.wav, (juce::int64) std::llround (r.in * 48000) + 48000);
+        auto raw = readMono (r.wav.getSiblingFile ("vocal_raw.wav"), take.rawOffset + 48000);
+        auto db = juce::Decibels::gainToDecibels ((float) (rms (v) / juce::jmax (1e-9, rms (raw))));
+        CHECK (db < -3.0f, "noise removal applied to the recording: " + juce::String (-db, 1) + " dB less noise");
+        engine.setNoiseEnabled (false);
+        engine.setProject (project.state());
     }
 
-    // ---- 6. export mix
+    // ---- export
     std::cout << "\nExport\n";
     {
-        engine.setMusicVolume (0.65f); engine.setVoiceVolume (0.8f);
-        auto dest = take.folder.getChildFile ("mix.wav");
+        auto dest = tmp.getChildFile ("mix.wav");
         bool done = false, ok = false;
-        engine.exportMix (take, dest, nullptr, [&] (bool o, juce::String) { ok = o; done = true; });
-        for (int i = 0; i < 100 && ! done; ++i) pump (100);
-        CHECK (done && ok && dest.existsAsFile(), "mix exported");
+        engine.exportMix (project.state(), dest, {}, nullptr, [&] (bool o, juce::String) { ok = o; done = true; });
+        for (int i = 0; i < 300 && ! done; ++i) pump (100);
+        CHECK (done && ok && dest.existsAsFile(), "whole project exported");
         juce::AudioFormatManager fm; fm.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (dest));
         CHECK (r != nullptr && r->numChannels == 2 && std::abs (r->sampleRate - 48000.0) < 0.5, "stereo 48 kHz WAV");
         if (r != nullptr)
         {
-            auto expectLen = (double) (readMono (take.vocal).size() - (size_t) take.vocalOffset) / 48000.0;
-            CHECK (std::abs (r->lengthInSamples / 48000.0 - expectLen) < 0.01, "mix length matches compensated vocal");
+            CHECK (std::abs (r->lengthInSamples / 48000.0 - 22.0) < 0.01, "length = project + 2 s tail");
             juce::AudioBuffer<float> b (2, (int) r->lengthInSamples);
             r->read (&b, 0, b.getNumSamples(), 0, true, true);
             auto mag = b.getMagnitude (0, b.getNumSamples());
-            CHECK (mag <= 0.9f, "safety limiter ceiling respected in mix (peak " + juce::String (mag, 3) + ")");
+            CHECK (mag <= 0.9f, "safety limiter ceiling respected (peak " + juce::String (mag, 3) + ")");
         }
+
+        // a selected part, voice only, through the full effect chain delay
+        auto m = *project.state().musicTrack(); m.mute = true; project.setTrack (m, false);
+        auto v = project.state().tracks.getReference (project.state().indexOf (voiceId));
+        FxParams fx; fx.fromString (v.fx); fx.setOn (FxParams::tuneOn, true); v.fx = fx.toString(); project.setTrack (v, false);
+        auto part = tmp.getChildFile ("part.wav");
+        done = false; ok = false;
+        engine.exportMix (project.state(), part, { 4.2, 5.8 }, nullptr, [&] (bool o, juce::String) { ok = o; done = true; });
+        for (int i = 0; i < 300 && ! done; ++i) pump (100);
+        std::unique_ptr<juce::AudioFormatReader> rp (fm.createReaderFor (part));
+        CHECK (ok && rp != nullptr && std::abs (rp->lengthInSamples / 48000.0 - 1.6) < 0.01, "selected part exported (1.6 s)");
+        auto mm = readMono (part, 0, 48000);
+        auto ref = readMono (song, (juce::int64) std::llround (4.2 * 48000), 48000);
+        double c = 0; auto lag = bestLag (mm, ref, 600, c);
+        CHECK (std::abs (lag) <= 1, "voice in export aligned after auto-tune delay (lag " + juce::String (lag) + ", corr " + juce::String (c, 3) + ")");
+        m.mute = false; project.setTrack (m, false);
+        engine.setProject (project.state());
     }
 
-    // ---- 6b. exported vocal stays aligned through the effect chain's delay
-    std::cout << "\nExport alignment through effects\n";
+    // ---- tempo change keeps the pitch
+    std::cout << "\nSpeed change (pitch kept)\n";
     {
-        auto& fx = engine.getFx();
-        const auto saved = fx.toString();
-        for (int i = 0; i < FxParams::numSwitches; ++i) fx.setOn ((FxParams::Switch) i, false);
-        fx.set (FxParams::tuneAmt, 0.0f);
-        engine.setMusicVolume (0.0f); engine.setVoiceVolume (1.0f);
-        auto dest = take.folder.getChildFile ("mix-align.wav");
-        bool done = false, ok = false;
-        engine.exportMix (take, dest, nullptr, [&] (bool o, juce::String) { ok = o; done = true; });
-        for (int i = 0; i < 100 && ! done; ++i) pump (100);
-        auto m = readMono (dest, 0, 48000 * 2);
-        auto ref = readMono (song, (juce::int64) std::llround (take.startSeconds * 48000), 48000 * 2);
-        double c = 0; auto lag = bestLag (m, ref, 600, c);
-        CHECK (ok && std::abs (lag) <= 1, "voice in exported mix aligned with song after auto-tune delay (lag " + juce::String (lag) + ", corr " + juce::String (c, 3) + ")");
-        fx.fromString (saved);
-        engine.setMusicVolume (0.65f); engine.setVoiceVolume (0.8f);
+        auto tone = tmp.getChildFile ("tone.wav");
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream> (tone);
+            auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions().withSampleRate (48000).withNumChannels (2).withBitsPerSample (24));
+            juce::AudioBuffer<float> b (2, 48000 * 5);
+            for (int i = 0; i < b.getNumSamples(); ++i) { auto x = 0.3f * (float) std::sin (2 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0); b.setSample (0, i, x); b.setSample (1, i, x); }
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        }
+        std::atomic<bool> cancel { false };
+        auto fast = tmp.getChildFile ("tone125.wav");
+        float lastP = 0;
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        auto e = renderTempo (tone, fast, 1.25, [&] (float p) { lastP = p; }, cancel);
+        const auto secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
+        auto x = readMono (fast);
+        CHECK (e.isEmpty() && std::abs (x.size() / 48000.0 - 4.0) < 0.05, "125% speed: 5 s -> " + juce::String (x.size() / 48000.0, 2) + " s (" + juce::String (secs, 1) + " s to render)");
+        std::vector<float> mid (x.begin() + 48000, x.begin() + 48000 * 3);
+        auto hz = estimateHz (mid, 48000.0);
+        CHECK (std::abs (hz - 440.0f) < 2.0f, "pitch unchanged (" + juce::String (hz, 1) + " Hz)");
+
+        // music track at 125%: voice clips keep their place relative to the music
+        project.replaceMusicAudio (musicId, fast, 1.25, tone);
+        auto* mt = project.state().musicTrack();
+        CHECK (mt != nullptr && std::abs (mt->clips.getReference (0).length() - 16.0) < 1e-6 && std::abs (mt->speed - 1.25) < 1e-9, "music track switched to the faster audio");
+        CHECK (std::abs (project.state().musicTimeAt (2.0) - 2.5) < 1e-9, "lyrics/video time follows the speed (2 s -> 2.5 s of song)");
+        project.undo();
+        engine.setProject (project.state());
     }
 
-    // ---- 7. take playback
-    std::cout << "\nListen to take\n";
+    // ---- loading/editing never blocks the audio thread
+    std::cout << "\nGlitch-free editing while playing\n";
     {
-        engine.setMonitorEnabled (true);
-        CHECK (engine.loadTakeForPlayback (take, err), "take loads for playback (song reloaded)");
-        CHECK (engine.hasSong() && std::abs (engine.getPosition() - take.startSeconds) < 0.01, "position set to take start");
-        engine.play(); pump (1000); engine.pause();
-        CHECK (engine.getPosition() > take.startSeconds + 0.8, "song + take play together");
-        engine.clearTakePlayback();
-        CHECK (! engine.hasTakePlayback(), "take playback cleared");
-    }
-
-    // ---- 8a. loading a song must not block the audio thread
-    std::cout << "\nGlitch-free loading\n";
-    {
-        auto* dev = dynamic_cast<FakeDevice*> (engine.getDeviceManager().getCurrentAudioDevice());
-        pump (200);
+        engine.setPosition (0.0);
+        engine.play();
+        pump (300);
         dev->maxCallbackMs = 0;
-        for (int i = 0; i < 3; ++i) { engine.loadSong (song, err); pump (100); engine.loadTakeForPlayback (take, err); pump (100); engine.clearTakePlayback(); }
-        CHECK (dev->maxCallbackMs.load() < 2.5, "max audio callback while loading: " + juce::String (dev->maxCallbackMs.load(), 3) + " ms");
+        for (int i = 0; i < 6; ++i)
+        {
+            project.deleteRange (voiceId, { 2.2 + i * 0.1, 2.3 + i * 0.1 });
+            engine.setProject (project.state());
+            pump (80);
+            project.undo();
+            engine.setProject (project.state());
+            pump (80);
+        }
+        engine.pause();
+        CHECK (dev->maxCallbackMs.load() < 2.5, "max audio callback while editing: " + juce::String (dev->maxCallbackMs.load(), 3) + " ms");
     }
 
-    // ---- 8. performance
+    // ---- performance
     std::cout << "\nPerformance (128-sample blocks @ 48 kHz = 2.67 ms budget)\n";
     {
-        auto* dev = dynamic_cast<FakeDevice*> (engine.getDeviceManager().getCurrentAudioDevice());
-        engine.setNoiseEnabled (true); engine.setNoiseInMonitor (true);
-        engine.loadSong (song, err);
+        auto second = project.addVocalTrack();
+        engine.setProject (project.state());
+        engine.setNoiseEnabled (true); engine.setNoiseInMonitor (true); engine.setMonitorEnabled (true);
+        engine.setPosition (0.0);
         pump (300);
         dev->totalCallbackMs = 0; dev->maxCallbackMs = 0; dev->callbacks = 0;
-        engine.play();
-        CHECK (engine.startRecording (err), "recording with noise removal + song playback");
+        CHECK (engine.startRecording (second, {}, err), "recording track 2 while music + track 1 play (noise removal, live mic)");
         pump (5000);
-        engine.stopRecording();
+        auto r = finishRecording();
+        engine.setMonitorEnabled (false);
         auto avg = dev->totalCallbackMs.load() / juce::jmax (1, dev->callbacks.load());
         std::cout << "        average callback: " << juce::String (avg, 4) << " ms (" << juce::String (100.0 * avg / 2.6667, 1) << "% of budget), max "
                   << juce::String (dev->maxCallbackMs.load(), 3) << " ms\n";
         CHECK (avg < 0.6, "average DSP load well under budget");
+        CHECK (r.ok && r.trackId == second, "second voice layer recorded");
     }
 
     testMedia (tmp, song);
 
+    // remove this run's recordings and project files
     for (auto& d : AudioEngine::recordingsFolder().findChildFiles (juce::File::findDirectories, false))
-        if (Take::load (d).backing == song || d.getFileName().startsWith (juce::String::fromUTF8 ("মুক্ত রেকর্ডিং")))
-            if (d.getCreationTime() > juce::Time::getCurrentTime() - juce::RelativeTime::minutes (10)) d.deleteRecursively();
+        if (d.getCreationTime() > juce::Time::getCurrentTime() - juce::RelativeTime::minutes (10) && d.getChildFile ("session.xml").existsAsFile()
+            && d.getChildFile ("session.xml").loadFileAsString().isNotEmpty() && testStart < d.getCreationTime()) d.deleteRecursively();
+    for (auto& f : Project::projectsFolder().findChildFiles (juce::File::findFiles, false, "engine test *.tfvs;free *.tfvs;engine test *.tmp;free *.tmp"))
+        f.deleteFile();   // only the test creates projects with these names
 
     std::cout << "\n" << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " TEST(S) FAILED") << "\n";
     engine.getDeviceManager().closeAudioDevice();

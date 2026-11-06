@@ -2,23 +2,39 @@
 
 #include "Theme.h"
 #include "AudioEngine.h"
+#include "Project.h"
 #include "Lyrics.h"
 #include "Media.h"
-#include "FxPanel.h"
+#include "Timeline.h"
+#include "Inspector.h"
 
 namespace tf
 {
 //==============================================================================
-/** Lyrics area: synced video, karaoke (.lrc) or a teleprompter for plain text lyrics. */
+/** A big option card on the home screen (icon, title, one line of help). */
+class OptionCard : public juce::Button
+{
+public:
+    OptionCard (const juce::String& title, const juce::String& sub, juce::Path icon, bool primary = false);
+    void paintButton (juce::Graphics&, bool over, bool down) override;
+private:
+    juce::String sub;
+    juce::Path icon;
+    bool primary;
+};
+
+//==============================================================================
+/** The stage: synced video, karaoke (.lrc) or a teleprompter for plain lyrics — or the home options. */
 class LyricsView : public juce::Component
 {
 public:
-    LyricsView (AudioEngine& e, juce::PropertiesFile& p);
+    LyricsView (AudioEngine&, Project&, juce::PropertiesFile&);
     void setLyrics (Lyrics l);
     void setVideo (const juce::File& videoOrNone);
     bool hasVideo() const { return video.isOpen(); }
     bool hasLyrics() const { return ! lyrics.isEmpty(); }
     bool isTeleprompter() const { return ! lyrics.isEmpty() && ! lyrics.timed; }
+    bool showingHome() const { return home; }
 
     enum class Mode { video, lyrics };
     void setMode (Mode m) { mode = m; repaint(); }
@@ -35,23 +51,27 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
 
-    TFButton addMedia     { juce::String::fromUTF8 ("অডিও / ভিডিও যোগ করুন"), TFButton::Style::accent };
-    TFButton openLibrary  { juce::String::fromUTF8 ("লাইব্রেরি থেকে বাছুন"), TFButton::Style::tool };
-    TFButton writeLyrics  { juce::String::fromUTF8 ("লিরিক্স লিখুন বা পেস্ট করুন"), TFButton::Style::accent };
+    OptionCard addAudio, addVideo, pasteLyrics, singFree;
+    TFButton openLibrary { juce::String::fromUTF8 ("লাইব্রেরি থেকে গান বাছুন"), TFButton::Style::ghost };
+    TFButton writeLyrics { juce::String::fromUTF8 ("লিরিক্স লিখুন বা পেস্ট করুন"), TFButton::Style::accent };
 
 private:
     void tick();
+    double songTime() const;
     void paintKaraoke (juce::Graphics&, juce::Rectangle<float>);
     void paintTeleprompter (juce::Graphics&, juce::Rectangle<float>);
     void drawLine (juce::Graphics&, const juce::String&, float centreY, float size, float alpha, double progress, bool current);
     void rebuildLayout();
     float pixelsPerSecond() const;
+    void updateHome();
 
     AudioEngine& engine;
+    Project& project;
     juce::PropertiesFile& props;
     Lyrics lyrics;
     VideoFrames video;
     Mode mode = Mode::lyrics;
+    bool home = false;
 
     float scrollIdx = 0.0f;
     float fontSize = 34.0f, speed = 1.0f;
@@ -60,34 +80,8 @@ private:
     float layoutWidth = 0.0f, layoutFont = 0.0f;
     double lastTick = 0;
     juce::Image lastFrame;
+    juce::Rectangle<int> homeTitle;
     juce::VBlankAttachment vblank { this, [this] { tick(); } };
-};
-
-//==============================================================================
-class WaveformView : public juce::Component, private juce::ChangeListener
-{
-public:
-    explicit WaveformView (AudioEngine& e);
-    ~WaveformView() override;
-    void setSong (const juce::File& audio);
-    void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override;
-    void mouseDrag (const juce::MouseEvent&) override;
-private:
-    void changeListenerCallback (juce::ChangeBroadcaster*) override { repaint(); }
-    void seekTo (float x);
-    double timelineLength() const;
-    juce::Rectangle<float> rowArea (int row) const;
-
-    AudioEngine& engine;
-    juce::AudioThumbnailCache cache { 4 };
-    juce::AudioThumbnail thumb;
-    double lastPos = -1;
-    juce::VBlankAttachment vblank { this, [this]
-    {
-        auto p = engine.getPosition();
-        if (std::abs (p - lastPos) > 1e-4 || engine.isRecording()) { lastPos = p; repaint(); }
-    } };
 };
 
 //==============================================================================
@@ -110,7 +104,7 @@ private:
 };
 
 //==============================================================================
-/** Progress overlay for long jobs (importing a video, AI separation). */
+/** Progress overlay for long jobs (importing a video). */
 class ProgressOverlay : public juce::Component, private juce::Timer
 {
 public:
@@ -138,13 +132,22 @@ public:
     StudioView (AudioEngine&, juce::PropertiesFile&);
     ~StudioView() override;
 
-    void loadSong (const juce::File& f);   // any audio or video file (imports when needed)
-    void loadTake (const Take& t);
+    /** From the library: sing this song (a new project unless the current one is still empty). */
+    void openSong (const juce::File& f);
+    void openProject (const juce::File& f);
+    void newProject();
     void togglePlay();
     void toggleRecord();
     void goToStart();
-    void chooseFile();
-    bool isBusy() const { return importing.load(); }
+    void chooseFile (bool video = false);
+    void undo()  { if (! engine.isRecording()) project.undo(); }
+    void redo()  { if (! engine.isRecording()) project.redo(); }
+    void deleteSelection() { timeline.deleteSelection(); }
+    void toggleLoop();
+    /** Stops playback/recording and puts any recording onto its track right away (used when closing). */
+    void stopAndKeep();
+    bool isBusy() const { return importing.load() || inspector.isBusy(); }
+    Project& getProject() { return project; }
 
     std::function<void()> onOpenLibrary;
     std::function<void (const juce::String&)> toast;
@@ -158,46 +161,57 @@ public:
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
+    void projectChanged();
     void updateTransportButtons();
     void updateToolbar();
     void showSaveMenu();
+    void showAddMenu();
+    void exportRange (juce::Range<double> range, bool mp3);
     void showError (const juce::String& msg);
-    void importAndLoad (const juce::File& f, bool copyToLibrary);
-    void songLoaded (const juce::File& f);
+    void importAndAdd (const juce::File& f, bool copyToLibrary);
+    void musicAdded (const juce::File& source, const juce::File& audio);
+    void reloadStage();
+    juce::File lyricsFile() const;
     void openLyricsEditor();
     void saveLyrics (const juce::String& text);
+    juce::String recordTrack();
+    void startRedoPart (const juce::String& trackId, juce::Range<double> range);
+    void singWithoutMusic();
+    void consumeRecording();
 
     AudioEngine& engine;
     juce::PropertiesFile& props;
+    Project project;
     Lyrics lyrics;
 
-    juce::Rectangle<int> lyricsCard, waveCard, transportCard, timeArea, headArea;
-    LyricsView lyricsView { engine, props };
-    WaveformView waveform { engine };
+    juce::Rectangle<int> stageCard, transportCard, timeArea, headArea, meterArea;
+    LyricsView stage { engine, project, props };
+    TimelineView timeline { project, engine };
+    Inspector inspector { project, engine, props };
     LyricsEditor lyricsEditor;
     ProgressOverlay overlay;
 
-    // lyrics toolbar
-    TFButton viewVideo { juce::String::fromUTF8 ("ভিডিও"), TFButton::Style::segment },
+    // stage toolbar
+    TFButton addBtn { juce::String::fromUTF8 ("যোগ করুন"), TFButton::Style::accent },
+             viewVideo { juce::String::fromUTF8 ("ভিডিও"), TFButton::Style::segment },
              viewLyrics { juce::String::fromUTF8 ("লিরিক্স"), TFButton::Style::segment },
              editLyricsBtn { juce::String::fromUTF8 ("লিরিক্স") },
              fontDown { juce::String::fromUTF8 ("অ−") }, fontUp { juce::String::fromUTF8 ("অ+") },
-             slower { juce::String::fromUTF8 ("−") }, faster { "+" },
-             changeSong { juce::String::fromUTF8 ("গান বদলান") };
+             slower { juce::String::fromUTF8 ("−") }, faster { "+" };
     juce::Rectangle<int> viewWell, speedArea;
 
+    // transport
     TFButton toStartBtn { juce::String::fromUTF8 ("শুরুতে যান") }, stopBtn { juce::String::fromUTF8 ("থামান") },
              playBtn { juce::String::fromUTF8 ("চালান"), TFButton::Style::primary },
              recBtn { juce::String::fromUTF8 ("রেকর্ড"), TFButton::Style::record },
-             listenBtn { juce::String::fromUTF8 ("রেকর্ডিং শুনুন") },
              saveBtn { juce::String::fromUTF8 ("সেভ / এক্সপোর্ট") };
-
-    juce::Viewport rightViewport;
-    FxPanel right { engine, props };
+    LevelMeter masterL, masterR;
 
     std::unique_ptr<juce::FileChooser> chooser;
     float exportProgress = -1.0f;
-    bool wasPlaying = false;
+    bool wasPlaying = false, wasRecording = false;
+    juce::File stageSource;
+    juce::String stageLyricsKey;
     std::atomic<bool> importing { false }, importCancel { false };
     juce::ThreadPool jobs { juce::ThreadPoolOptions().withThreadName ("TF import").withNumberOfThreads (1) };
 };

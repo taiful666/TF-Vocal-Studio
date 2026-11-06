@@ -1,0 +1,1 @@
+Rubber Band Library, https://github.com/breakfastquay/rubberband commit e4296ac (GPL-2.0-or-later)

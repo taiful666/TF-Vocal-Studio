@@ -42,6 +42,19 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Rubber Band Library (GPL-2.0-or-later) — high-quality tempo change, single-file build
+# ---------------------------------------------------------------------------
+add_library(rubberband STATIC third_party/rubberband/single/RubberBandSingle.cpp)
+target_include_directories(rubberband PUBLIC third_party/rubberband)
+target_compile_features(rubberband PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(rubberband PRIVATE /W0 /O2)
+    target_compile_definitions(rubberband PRIVATE _USE_MATH_DEFINES NOMINMAX)
+else()
+    target_compile_options(rubberband PRIVATE -w -O2)
+endif()
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 juce_add_gui_app(TFVocalStudio
@@ -71,7 +84,11 @@ target_sources(TFVocalStudio PRIVATE
     Source/Lyrics.cpp
     Source/VocalFx.cpp
     Source/Media.cpp
-    Source/FxPanel.cpp)
+    Source/Project.cpp
+    Source/Stretch.cpp
+    Source/Timeline.cpp
+    Source/Inspector.cpp
+    Source/Settings.cpp)
 
 target_compile_definitions(TFVocalStudio PRIVATE
     JUCE_WEB_BROWSER=0
@@ -99,6 +116,7 @@ target_link_libraries(TFVocalStudio
     PRIVATE
         TFVSData
         rnnoise
+        rubberband
         juce::juce_audio_utils
         juce::juce_audio_devices
         juce::juce_audio_formats
@@ -115,13 +133,13 @@ target_link_libraries(TFVocalStudio
 option(TF_BUILD_TESTS "Build the automated engine test" OFF)
 if(TF_BUILD_TESTS)
     juce_add_console_app(TFEngineTest PRODUCT_NAME "TFEngineTest")
-    target_sources(TFEngineTest PRIVATE Tests/EngineTest.cpp Source/AudioEngine.cpp Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp)
+    target_sources(TFEngineTest PRIVATE Tests/EngineTest.cpp Source/AudioEngine.cpp Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp Source/Project.cpp Source/Stretch.cpp)
     target_include_directories(TFEngineTest PRIVATE Source third_party)
     if(MSVC)
         target_compile_options(TFEngineTest PRIVATE /utf-8 /MP)
     endif()
     target_compile_definitions(TFEngineTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_USE_MP3AUDIOFORMAT=1 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1)
-    target_link_libraries(TFEngineTest PRIVATE rnnoise juce::juce_audio_utils juce::juce_dsp
+    target_link_libraries(TFEngineTest PRIVATE rnnoise rubberband juce::juce_audio_utils juce::juce_dsp
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endif()

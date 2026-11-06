@@ -89,6 +89,24 @@ namespace media
         return r != nullptr && r->lengthInSamples > 0;
     }
 
+    juce::String displayName (const juce::File& f)
+    {
+        auto n = f.getFileNameWithoutExtension();
+        // "YTDown.com_YouTube_Media_<11-char id>_Title" and similar download-site names
+        if (auto k = n.indexOfIgnoreCase ("YouTube_Media_"); k >= 0)
+        {
+            auto rest = n.substring (k + 14);
+            n = rest.length() > 12 && rest[11] == '_' ? rest.substring (12) : rest;
+        }
+        for (auto prefix : { "y2mate.com - ", "y2mate.is - ", "ssyoutube.com - ", "YTDown.com_", "SnapSave.io - ", "savefrom.net - " })
+            if (n.startsWithIgnoreCase (prefix)) n = n.substring ((int) strlen (prefix));
+        for (auto tail : { "_128k", "_320k", "_192k", "_720p", "_1080p", "_360p", "_480p", " (128k)", " (320 kbps)" })
+            if (n.endsWithIgnoreCase (tail)) n = n.dropLastCharacters ((int) strlen (tail));
+        n = n.replaceCharacter ('_', ' ').trim();
+        while (n.contains ("  ")) n = n.replace ("  ", " ");
+        return n.isEmpty() ? f.getFileNameWithoutExtension() : n;
+    }
+
     juce::String extractAudio (const juce::File& in, const juce::File& outWav, double sampleRate,
                                std::function<void (float)> progress, std::atomic<bool>& cancel)
     {
@@ -131,6 +149,30 @@ namespace media
         outWav.deleteFile();
         tmp.moveFileTo (outWav);
         if (progress) progress (1.0f);
+        return {};
+    }
+
+    juce::String encodeMp3 (const juce::File& wav, const juce::File& mp3)
+    {
+        auto exe = ffmpeg();
+        if (! exe.existsAsFile()) return juce::String::fromUTF8 ("ffmpeg পাওয়া যায়নি — সফটওয়্যারটি আবার ইনস্টল করুন।");
+        auto tmp = mp3.getSiblingFile (mp3.getFileNameWithoutExtension() + ".part.mp3");
+        tmp.deleteFile();
+        juce::ChildProcess cp;
+        juce::StringArray args { exe.getFullPathName(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                                 "-i", wav.getFullPathName(), "-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3",
+                                 "-metadata", "encoded_by=TF Vocal Studio", tmp.getFullPathName() };
+        if (! cp.start (args, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr))
+            return juce::String::fromUTF8 ("ffmpeg চালু করা যায়নি।");
+        cp.readAllProcessOutput();
+        cp.waitForProcessToFinish (120000);
+        if (cp.getExitCode() != 0 || ! tmp.existsAsFile() || tmp.getSize() < 1000)
+        {
+            tmp.deleteFile();
+            return juce::String::fromUTF8 ("MP3 তৈরি করা যায়নি।");
+        }
+        mp3.deleteFile();
+        tmp.moveFileTo (mp3);
         return {};
     }
 }

@@ -4,6 +4,7 @@
 #include "AudioEngine.h"
 #include "Lyrics.h"
 #include "Media.h"
+#include "Project.h"
 
 namespace tf
 {
@@ -17,7 +18,8 @@ public:
     ~LibraryView() override;
 
     std::function<void (const juce::File&)> onSing;
-    std::function<void (const Take&)> onOpenTake;
+    std::function<void (const juce::File&)> onOpenProject;
+    std::function<void()> onNewProject;
     std::function<void (const juce::String&)> toast;
 
     void refresh();
@@ -32,9 +34,8 @@ public:
 
     struct Item
     {
-        juce::File file;          // song file, or take folder
-        Take take;
-        bool isTake = false;
+        juce::File file;          // song file, or project file (.tfvs)
+        bool isTake = false;      // true = a project
         juce::String name, kind, lyricsText;
         juce::Colour lyricsColour;
         double duration = -1.0;
@@ -54,6 +55,10 @@ private:
     void separate (const juce::File& song);
     void chooseForSeparation();
     void setTab (bool recordings);
+    void renameItem (const Item& it);
+    juce::String songName (const juce::File& f) const;
+    juce::StringPairArray loadNames() const;
+    void saveName (const juce::File& f, const juce::String& name);
 
     class Row;
     friend class Row;
@@ -63,7 +68,7 @@ private:
     juce::Array<Item> items, filtered;
 
     TFButton songsTab { juce::String::fromUTF8 ("গান"), TFButton::Style::segment },
-             takesTab { juce::String::fromUTF8 ("আমার রেকর্ডিং"), TFButton::Style::segment },
+             takesTab { juce::String::fromUTF8 ("আমার প্রজেক্ট"), TFButton::Style::segment },
              addBtn   { juce::String::fromUTF8 ("গান যোগ করুন"), TFButton::Style::accent },
              folderBtn { juce::String::fromUTF8 ("গানের ফোল্ডার খুলুন") },
              sepBtn { juce::String::fromUTF8 ("গান বাছুন"), TFButton::Style::accent },

@@ -1,53 +1,10 @@
 #include "MainComponent.h"
 #include "BinaryData.h"
+#include "Settings.h"
 
 namespace tf
 {
 static juce::String u8 (const char* s) { return juce::String::fromUTF8 (s); }
-
-//==============================================================================
-/** Audio settings dialog: device, driver, sample rate, buffer + recording sync offset. */
-class SettingsPanel : public juce::Component
-{
-public:
-    SettingsPanel (AudioEngine& e, juce::PropertiesFile& p)
-        : engine (e), props (p),
-          selector (e.getDeviceManager(), 1, 2, 2, 2, false, false, false, false),
-          offset (u8 ("রেকর্ডিং সিঙ্ক ঠিক করা"), -150, 150, e.getUserOffsetMs(),
-                  [] (double v) { auto i = (int) std::round (v); return (i > 0 ? "+" : "") + bn (i) + " ms"; })
-    {
-        addAndMakeVisible (selector);
-        addAndMakeVisible (offset);
-        offset.onChange = [this] (double v) { engine.setUserOffsetMs ((float) v); props.setValue ("userOffsetMs", v); };
-        setSize (660, 640);
-    }
-
-    void paint (juce::Graphics& g) override
-    {
-        g.fillAll (col::panel);
-        auto r = getLocalBounds().reduced (24).removeFromBottom (120);
-        g.setColour (col::muted);
-        g.setFont (font (14.0f));
-        g.drawFittedText (u8 ("সবচেয়ে কম দেরির জন্য: Audio device type-এ \"Windows Audio (Low Latency Mode)\" বা \"Windows Audio (Exclusive Mode)\" বাছুন, "
-                              "Sample rate ৪৮০০০ রাখুন (AI নয়েজ রিমুভ এতে চলে), আর Buffer size যত ছোট রাখা যায় — শব্দ ভাঙলে একটু বাড়ান।\n"
-                              "রেকর্ডিংয়ে কণ্ঠ মিউজিকের চেয়ে পিছিয়ে শোনালে সিঙ্ক বাড়ান, এগিয়ে শোনালে কমান।"),
-                          r.withTrimmedTop (64), juce::Justification::topLeft, 6, 1.0f);
-    }
-
-    void resized() override
-    {
-        auto r = getLocalBounds().reduced (12);
-        auto bottom = r.removeFromBottom (132);
-        selector.setBounds (r);
-        offset.setBounds (bottom.reduced (12, 0).removeFromTop (52));
-    }
-
-private:
-    AudioEngine& engine;
-    juce::PropertiesFile& props;
-    juce::AudioDeviceSelectorComponent selector;
-    LabeledSlider offset;
-};
 
 //==============================================================================
 MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
@@ -59,7 +16,7 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
 
     auto saved = props.getXmlValue ("audioDevice");
     engine.initialise (saved.get());
-    engine.setUserOffsetMs ((float) props.getDoubleValue ("userOffsetMs", 0.0));
+    applySavedAudioSettings (engine, props);
     engine.addChangeListener (this);
 
     for (auto* b : { &studioTab, &libraryTab }) addAndMakeVisible (b);
@@ -84,13 +41,11 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
     studio.toast = [this] (const juce::String& t) { showToast (t); };
     library.toast = studio.toast;
     studio.onOpenLibrary = [this] { showPage (1); };
-    library.onSing = [this] (const juce::File& f) { studio.loadSong (f); showPage (0); };
-    library.onOpenTake = [this] (const Take& t) { showPage (0); studio.loadTake (t); };
+    library.onSing = [this] (const juce::File& f) { showPage (0); studio.openSong (f); };
+    library.onOpenProject = [this] (const juce::File& f) { showPage (0); studio.openProject (f); };
+    library.onNewProject = [this] { showPage (0); studio.newProject(); };
 
     toastAnim.onChange = [this] { repaint (getLocalBounds().withHeight (140)); };
-
-    auto last = juce::File (props.getValue ("lastSong"));
-    if (last.existsAsFile()) studio.loadSong (last);
 
     showPage (0);
     startTimerHz (2);
@@ -152,22 +107,15 @@ void MainComponent::showPage (int index)
 
 void MainComponent::showSettings()
 {
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (new SettingsPanel (engine, props));
-    o.dialogTitle = u8 ("অডিও সেটিংস");
-    o.dialogBackgroundColour = col::panel;
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar = true;
-    o.resizable = false;
-    o.componentToCentreAround = this;
-    o.launchAsync();
+    showAudioSettings (this, engine, props);
 }
 
 void MainComponent::openFile (const juce::File& f)
 {
     if (! f.existsAsFile()) return;
-    studio.loadSong (f);
     showPage (0);
+    if (f.hasFileExtension ("tfvs")) studio.openProject (f);
+    else studio.openSong (f);
 }
 
 void MainComponent::showToast (const juce::String& text)
@@ -183,10 +131,15 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
         return false;
 
     if (k == juce::KeyPress::spaceKey)                                  { studio.togglePlay(); return true; }
-    if (k.getKeyCode() == 'R' || k.getKeyCode() == 'r')                 { if (studio.isVisible()) studio.toggleRecord(); return true; }
-    if (k.getKeyCode() == 'L' || k.getKeyCode() == 'l')                 { toggleLive(); return true; }
+    if ((k.getKeyCode() == 'R' || k.getKeyCode() == 'r') && ! k.getModifiers().isCommandDown()) { if (studio.isVisible()) studio.toggleRecord(); return true; }
+    if ((k.getKeyCode() == 'L' || k.getKeyCode() == 'l') && ! k.getModifiers().isCommandDown()) { toggleLive(); return true; }
     if (k == juce::KeyPress::homeKey)                                    { studio.goToStart(); return true; }
-    if (k == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { studio.chooseFile(); return true; }
+    if (k == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { showPage (0); studio.chooseFile(); return true; }
+    if (k == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { studio.undo(); return true; }
+    if (k == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)
+        || k == juce::KeyPress ('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { studio.redo(); return true; }
+    if (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) { if (studio.isVisible()) studio.deleteSelection(); return true; }
+    if (k == juce::KeyPress ('l', juce::ModifierKeys::commandModifier, 0)) { studio.toggleLoop(); return true; }
     if (k == juce::KeyPress ('1', juce::ModifierKeys::commandModifier, 0)) { showPage (0); return true; }
     if (k == juce::KeyPress ('2', juce::ModifierKeys::commandModifier, 0)) { showPage (1); return true; }
     return false;

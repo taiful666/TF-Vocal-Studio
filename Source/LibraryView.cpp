@@ -38,11 +38,11 @@ public:
         action.onClick = [this] { activate(); };
         folder.onClick = [this]
         {
-            if (auto* it = item()) (it->isTake ? it->take.folder : it->file).revealToUser();
+            if (auto* it = item()) it->file.revealToUser();
         };
     }
 
-    void update (int r) { row = r; if (auto* it = item()) action.setText (it->isTake ? u8 ("শুনুন") : u8 ("গাইব")); repaint(); }
+    void update (int r) { row = r; if (auto* it = item()) action.setText (it->isTake ? u8 ("খুলুন") : u8 ("গাইব")); repaint(); }
 
     const Item* item() const { return juce::isPositiveAndBelow (row, owner.filtered.size()) ? &owner.filtered.getReference (row) : nullptr; }
 
@@ -50,7 +50,7 @@ public:
     {
         if (auto* it = item())
         {
-            if (it->isTake) { if (owner.onOpenTake) owner.onOpenTake (it->take); }
+            if (it->isTake) { if (owner.onOpenProject) owner.onOpenProject (it->file); }
             else if (owner.onSing) owner.onSing (it->file);
         }
     }
@@ -83,7 +83,7 @@ public:
         g.drawText (it->lyricsText, c.lyr, juce::Justification::centredLeft, true);
 
         double d = it->duration;
-        if (d < 0) { const juce::ScopedLock sl (owner.durLock); auto f = owner.durations.find ((it->isTake ? it->take.vocal : it->file).getFullPathName()); if (f != owner.durations.end()) d = f->second; }
+        if (d < 0) { const juce::ScopedLock sl (owner.durLock); auto f = owner.durations.find (it->file.getFullPathName()); if (f != owner.durations.end()) d = f->second; }
         g.setColour (col::inkSoft);
         g.setFont (font (15.0f));
         g.drawText (d >= 0 ? bnTime (d) : juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa6")), c.dur, juce::Justification::centredRight);
@@ -112,7 +112,7 @@ LibraryView::LibraryView (AudioEngine& e) : engine (e)
     takesTab.onClick = [this] { setTab (true); };
 
     addBtn.setIcon (icons::plus(), false, 18.0f);
-    addBtn.onClick = [this] { chooseSongs(); };
+    addBtn.onClick = [this] { if (showingTakes) { if (onNewProject) onNewProject(); } else chooseSongs(); };
     addAndMakeVisible (addBtn);
 
     sepBtn.setIcon (icons::sparkle(), false, 18.0f);
@@ -122,7 +122,7 @@ LibraryView::LibraryView (AudioEngine& e) : engine (e)
     addChildComponent (sepCancel);
 
     folderBtn.setIcon (icons::folder(), false, 18.0f);
-    folderBtn.onClick = [this] { (showingTakes ? AudioEngine::recordingsFolder() : AudioEngine::songsFolder()).revealToUser(); };
+    folderBtn.onClick = [this] { (showingTakes ? Project::projectsFolder() : AudioEngine::songsFolder()).revealToUser(); };
     addAndMakeVisible (folderBtn);
 
     search.setTextToShowWhenEmpty (juce::String::fromUTF8 ("গানের নাম লিখে খুঁজুন…"), col::dim);
@@ -152,7 +152,9 @@ void LibraryView::setTab (bool recordings)
     showingTakes = recordings;
     songsTab.setSelected (! recordings);
     takesTab.setSelected (recordings);
-    folderBtn.setText (recordings ? u8 ("রেকর্ডিং ফোল্ডার খুলুন") : u8 ("গানের ফোল্ডার খুলুন"));
+    folderBtn.setText (recordings ? u8 ("প্রজেক্ট ফোল্ডার খুলুন") : u8 ("গানের ফোল্ডার খুলুন"));
+    addBtn.setText (recordings ? u8 ("নতুন প্রজেক্ট") : u8 ("গান যোগ করুন"));
+    search.setTextToShowWhenEmpty (recordings ? u8 ("প্রজেক্টের নাম লিখে খুঁজুন…") : u8 ("গানের নাম লিখে খুঁজুন…"), col::dim);
     refresh();
 }
 
@@ -170,7 +172,7 @@ void LibraryView::refresh()
             if (! f.hasFileExtension (mediaExts())) continue;
             Item it;
             it.file = f;
-            it.name = f.getFileNameWithoutExtension();
+            it.name = songName (f);
             it.kind = media::isVideo (f) ? u8 ("ভিডিও (") + f.getFileExtension().substring (1).toUpperCase() + ")"
                                          : f.getFileExtension().substring (1).toUpperCase() + u8 (" অডিও");
             auto lf = Lyrics::findFor (f);
@@ -185,21 +187,21 @@ void LibraryView::refresh()
     }
     else
     {
-        for (auto& d : AudioEngine::recordingsFolder().findChildFiles (juce::File::findDirectories, false))
+        for (auto& f : Project::projectsFolder().findChildFiles (juce::File::findFiles, false, "*.tfvs"))
         {
-            auto t = Take::load (d);
-            if (! t.isValid()) continue;
+            ProjectState ps;
+            if (! projectFromXml (f.loadFileAsString(), ps)) continue;
             Item it;
             it.isTake = true;
-            it.take = t;
-            it.file = d;
-            it.name = d.getFileName();
-            it.kind = t.backing.existsAsFile() ? u8 ("গানের সাথে") : u8 ("শুধু কণ্ঠ");
-            auto hasMix = ! d.findChildFiles (juce::File::findFiles, false, "*mix.wav").isEmpty();
-            it.lyricsText = hasMix ? u8 ("মিক্স সেভ করা") : u8 ("শুধু রেকর্ডিং");
-            it.lyricsColour = hasMix ? col::okText : col::muted;
-            it.duration = t.lengthSeconds;
-            it.date = d.getCreationTime();
+            it.file = f;
+            it.name = ps.name.isNotEmpty() ? ps.name : f.getFileNameWithoutExtension();
+            int voices = 0, takes = 0;
+            for (auto& t : ps.tracks) if (t.kind == TrackKind::vocal) { ++voices; takes += t.clips.size(); }
+            it.kind = (ps.musicTrack() != nullptr ? u8 ("মিউজিক + ") : juce::String()) + bn (voices) + u8 (" কণ্ঠ ট্র্যাক");
+            it.lyricsText = takes > 0 ? bn (takes) + u8 ("টি রেকর্ডিং") : u8 ("এখনো রেকর্ড হয়নি");
+            it.lyricsColour = takes > 0 ? col::okText : col::muted;
+            it.duration = ps.length();
+            it.date = f.getLastModificationTime();
             items.add (it);
         }
         std::sort (items.begin(), items.end(), [] (const Item& a, const Item& b) { return a.date > b.date; });
@@ -370,15 +372,17 @@ void LibraryView::showRowMenu (int row)
     if (! juce::isPositiveAndBelow (row, filtered.size())) return;
     auto it = filtered[row];
     juce::PopupMenu m;
-    m.addItem (1, it.isTake ? u8 ("শুনুন") : u8 ("গাইব"));
+    m.addItem (1, it.isTake ? u8 ("খুলুন") : u8 ("গাইব"));
+    m.addItem (5, u8 ("নাম বদলান…"));
     m.addItem (2, u8 ("ফোল্ডারে দেখুন"));
     if (! it.isTake) m.addItem (4, u8 ("AI দিয়ে কণ্ঠ ও মিউজিক আলাদা করুন"), ! sepBusy.load());
     m.addSeparator();
     m.addItem (3, u8 ("মুছে ফেলুন…"));
     m.showMenuAsync ({}, [this, it] (int r)
     {
-        if (r == 1) { if (it.isTake) { if (onOpenTake) onOpenTake (it.take); } else if (onSing) onSing (it.file); }
-        if (r == 2) (it.isTake ? it.take.folder : it.file).revealToUser();
+        if (r == 1) { if (it.isTake) { if (onOpenProject) onOpenProject (it.file); } else if (onSing) onSing (it.file); }
+        if (r == 2) it.file.revealToUser();
+        if (r == 5) renameItem (it);
         if (r == 4) separate (it.file);
         if (r == 3)
         {
@@ -393,7 +397,7 @@ void LibraryView::showRowMenu (int row)
                                           [safe, it] (int result)
             {
                 if (result != 1 || safe == nullptr) return;
-                if (it.isTake) it.take.folder.moveToTrash();
+                if (it.isTake) it.file.moveToTrash();
                 else
                 {
                     it.file.moveToTrash();
@@ -404,6 +408,53 @@ void LibraryView::showRowMenu (int row)
             });
         }
     });
+}
+
+juce::StringPairArray LibraryView::loadNames() const
+{
+    juce::StringPairArray names;
+    for (auto line : juce::StringArray::fromLines (AudioEngine::songsFolder().getChildFile ("names.tsv").loadFileAsString()))
+        if (line.contains ("\t")) names.set (line.upToFirstOccurrenceOf ("\t", false, false), line.fromFirstOccurrenceOf ("\t", false, false));
+    return names;
+}
+
+juce::String LibraryView::songName (const juce::File& f) const
+{
+    auto names = loadNames();
+    auto n = names[f.getFileName()];
+    return n.isNotEmpty() ? n : media::displayName (f);
+}
+
+void LibraryView::saveName (const juce::File& f, const juce::String& name)
+{
+    auto names = loadNames();
+    names.set (f.getFileName(), name.replaceCharacters ("\t\r\n", "   "));
+    juce::StringArray lines;
+    for (auto& k : names.getAllKeys()) if (names[k].isNotEmpty()) lines.add (k + "\t" + names[k]);
+    AudioEngine::songsFolder().getChildFile ("names.tsv").replaceWithText (lines.joinIntoString ("\n"));
+}
+
+void LibraryView::renameItem (const Item& it)
+{
+    auto* w = new juce::AlertWindow (u8 ("নাম বদলান"), {}, juce::MessageBoxIconType::NoIcon, this);
+    w->addTextEditor ("name", it.name);
+    w->addButton (u8 ("ঠিক আছে"), 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton (u8 ("বাতিল"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<LibraryView> safe (this);
+    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w, it] (int r)
+    {
+        if (safe == nullptr || r != 1) return;
+        auto n = w->getTextEditorContents ("name").trim();
+        if (n.isEmpty()) return;
+        if (it.isTake)
+        {
+            // projects keep their file; only the name inside changes
+            ProjectState ps;
+            if (projectFromXml (it.file.loadFileAsString(), ps)) { ps.name = n; it.file.replaceWithText (projectToXml (ps)); }
+        }
+        else safe->saveName (it.file, n);   // song files are never renamed: projects point to them
+        safe->refresh();
+    }), true);
 }
 
 void LibraryView::resized()
@@ -463,7 +514,7 @@ void LibraryView::paint (juce::Graphics& g)
     auto c = layoutCols (headerRow.reduced (20, 0));
     g.setColour (col::muted);
     g.setFont (font (14.0f));
-    g.drawText (showingTakes ? u8 ("রেকর্ডিং") : u8 ("গান"), c.name, juce::Justification::centredLeft);
+    g.drawText (showingTakes ? u8 ("প্রজেক্ট") : u8 ("গান"), c.name, juce::Justification::centredLeft);
     g.drawText (u8 ("ধরন"), c.kind, juce::Justification::centredLeft);
     g.drawText (showingTakes ? u8 ("অবস্থা") : u8 ("লিরিক্স"), c.lyr, juce::Justification::centredLeft);
     g.drawText (u8 ("সময়"), c.dur, juce::Justification::centredRight);
@@ -475,7 +526,7 @@ void LibraryView::paint (juce::Graphics& g)
         g.setFont (font (20.0f, Weight::semibold));
         juce::String title, sub;
         if (search.getText().isNotEmpty()) { title = u8 ("কিছু পাওয়া যায়নি"); sub = u8 ("অন্য নাম লিখে খুঁজে দেখুন"); }
-        else if (showingTakes) { title = u8 ("এখনো কোনো রেকর্ডিং নেই"); sub = u8 ("স্টুডিওতে গিয়ে রেকর্ড বাটনে চাপুন"); }
+        else if (showingTakes) { title = u8 ("এখনো কোনো প্রজেক্ট নেই"); sub = u8 ("স্টুডিওতে কিছু রেকর্ড করলেই এখানে নিজে থেকে সেভ হবে"); }
         else { title = u8 ("লাইব্রেরিতে এখনো গান নেই"); sub = u8 ("\"গান যোগ করুন\" চাপুন, বা গানের ফাইল এখানে টেনে আনুন"); }
         g.drawText (title, e.withY (e.getCentreY() - 36).withHeight (34), juce::Justification::centred);
         g.setColour (col::muted);
