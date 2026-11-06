@@ -63,6 +63,8 @@ namespace icons
     juce::Path music();
     juce::Path search();
     juce::Path sparkle();
+    juce::Path mic();
+    juce::Path wand();
 }
 
 /** Draw a 24x24-viewBox icon path into area, stroked (line icons) or filled. */

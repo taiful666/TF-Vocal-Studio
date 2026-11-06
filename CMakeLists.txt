@@ -68,7 +68,10 @@ target_sources(TFVocalStudio PRIVATE
     Source/Theme.cpp
     Source/StudioView.cpp
     Source/LibraryView.cpp
-    Source/Lyrics.cpp)
+    Source/Lyrics.cpp
+    Source/VocalFx.cpp
+    Source/Media.cpp
+    Source/FxPanel.cpp)
 
 target_compile_definitions(TFVocalStudio PRIVATE
     JUCE_WEB_BROWSER=0
@@ -112,8 +115,8 @@ target_link_libraries(TFVocalStudio
 option(TF_BUILD_TESTS "Build the automated engine test" OFF)
 if(TF_BUILD_TESTS)
     juce_add_console_app(TFEngineTest PRODUCT_NAME "TFEngineTest")
-    target_sources(TFEngineTest PRIVATE Tests/EngineTest.cpp Source/AudioEngine.cpp Source/Lyrics.cpp)
-    target_include_directories(TFEngineTest PRIVATE Source)
+    target_sources(TFEngineTest PRIVATE Tests/EngineTest.cpp Source/AudioEngine.cpp Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp)
+    target_include_directories(TFEngineTest PRIVATE Source third_party)
     if(MSVC)
         target_compile_options(TFEngineTest PRIVATE /utf-8 /MP)
     endif()

@@ -29,8 +29,38 @@ jobs:
       - name: Build app and engine test (Release)
         run: cmake --build build --config Release --parallel
 
-      - name: Run engine test (sample-accurate sync, noise removal, export, CPU load)
-        run: '& "build\TFEngineTest_artefacts\Release\TFEngineTest.exe"'
+      - name: Get bundled tools (pinned versions, SHA-256 verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          New-Item -ItemType Directory -Force deps, bundle\models | Out-Null
+          function Get-Verified($url, $out, $sha) {
+            Invoke-WebRequest -Uri $url -OutFile $out
+            $h = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            if ($h -ne $sha) { throw "Checksum mismatch for $out ($h)" }
+          }
+          # FFmpeg 8.0 (Gyan.dev essentials build, GitHub mirror)
+          Get-Verified "https://github.com/GyanD/codexffmpeg/releases/download/8.0/ffmpeg-8.0-essentials_build.zip" deps\ff.zip "647e467caf82b9fa200a562769b5ff4d736aaf725804ed2c64ea9752106fa569"
+          # sherpa-onnx 2.0.1 (AI separation engine, Apache-2.0) + ONNX Runtime (MIT)
+          Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2" deps\so.tar.bz2 "dc703575a68594435f53dec93df775ff4913af851a196c0537163f21d8d2364e"
+          # UVR MDX-Net Inst HQ 3 model (music / voice separation)
+          Get-Verified "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_3.onnx" bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx "c207b845d51dc1303c543503f6f5a8b596da5d7de97bead77b3e16ec38e8d5b3"
+          Expand-Archive deps\ff.zip deps\ff
+          tar -xjf deps\so.tar.bz2 -C deps
+          Copy-Item deps\ff\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe bundle\
+          Copy-Item deps\ff\ffmpeg-8.0-essentials_build\LICENSE bundle\FFMPEG-LICENSE.txt
+          $so = "deps\sherpa-onnx-v2.0.1-win-x64-shared-MT-Release\lib"
+          Copy-Item "$so\sherpa-onnx-c-api.dll", "$so\onnxruntime.dll", "$so\onnxruntime_providers_shared.dll" bundle\
+          Get-ChildItem -Recurse bundle | Format-Table Name, Length
+
+      - name: Run engine test (sync, effects, auto-tune, video, AI separation, CPU load)
+        shell: pwsh
+        run: |
+          $t = "build\TFEngineTest_artefacts\Release"
+          Copy-Item -Recurse -Force bundle\* $t\
+          & "$t\TFEngineTest.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Engine test failed" }
 
       - name: Work out version
         id: ver
@@ -46,7 +76,9 @@ jobs:
         shell: pwsh
         run: |
           $exe = Resolve-Path "build\TFVocalStudio_artefacts\Release\TF Vocal Studio.exe"
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" "/DSourceExe=$exe" installer\TFVocalStudio.iss
+          $bundle = Resolve-Path "bundle"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" "/DSourceExe=$exe" "/DBundleDir=$bundle" installer\TFVocalStudio.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
           Get-FileHash installer\Output\*.exe -Algorithm SHA256 | Format-List
 
       - name: Upload Setup.exe

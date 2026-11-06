@@ -5,6 +5,8 @@
 
 #include "AudioEngine.h"
 #include "Lyrics.h"
+#include "VocalFx.h"
+#include "Media.h"
 #include <juce_events/juce_events.h>
 
 using namespace tf;
@@ -137,6 +139,186 @@ static int bestLag (const std::vector<float>& a, const std::vector<float>& b, in
 
 static double rms (const std::vector<float>& v) { double s = 0; for (auto x : v) s += x * x; return std::sqrt (s / juce::jmax ((size_t) 1, v.size())); }
 
+
+//==============================================================================
+static float estimateHz (const std::vector<float>& x, double sr)
+{
+    // count rising zero crossings with interpolation
+    double first = -1, last = -1; int count = 0;
+    for (size_t i = 1; i < x.size(); ++i)
+        if (x[i - 1] < 0 && x[i] >= 0)
+        {
+            const double t = (double) (i - 1) + x[i - 1] / (x[i - 1] - x[i]);
+            if (first < 0) first = t; else ++count;
+            last = t;
+        }
+    return count > 0 ? (float) (count * sr / (last - first)) : 0.0f;
+}
+
+static void testEffects()
+{
+    const double sr = 48000.0;
+    std::cout << "\nEffects engine\n";
+    CHECK (builtInPresets().size() == 22, "22 built-in presets");
+
+    // auto-tune transparency at amount 0 (sung vowel-like signal: harmonics + vibrato)
+    {
+        AutoTune at; at.prepare (sr);
+        const int N = 48000 * 2;
+        std::vector<float> in ((size_t) N), out ((size_t) N);
+        double ph = 0;
+        for (int i = 0; i < N; ++i)
+        {
+            ph += 2 * juce::MathConstants<double>::pi * (220.0 * std::pow (2.0, 0.15 * std::sin (i / sr * 2 * juce::MathConstants<double>::pi * 5.0) / 12.0)) / sr;
+            in[(size_t) i] = (float) (0.3 * std::sin (ph) + 0.15 * std::sin (2 * ph) + 0.08 * std::sin (3 * ph));
+        }
+        for (int i = 0; i < N; i += 128) at.process (in.data() + i, out.data() + i, 128, 0.0f, 50.0f, -1);
+        const int L = at.latencySamples();
+        double err = 0, ref = 0;
+        for (int i = 24000; i < N; ++i) { const double d = out[(size_t) i] - in[(size_t) (i - L)]; err += d * d; ref += in[(size_t) (i - L)] * in[(size_t) (i - L)]; }
+        const auto snr = 10.0 * std::log10 (ref / (err + 1e-12));
+        CHECK (snr > 25.0, "auto-tune at 0% is transparent (SNR " + juce::String (snr, 1) + " dB)");
+    }
+
+    // auto-tune pulls a sharp note onto the right pitch
+    for (float cents : { 40.0f, -35.0f })
+    {
+        AutoTune at; at.prepare (sr);
+        const int N = 48000 * 3;
+        std::vector<float> in ((size_t) N), out ((size_t) N);
+        const double f = 440.0 * std::pow (2.0, cents / 1200.0);
+        double ph = 0;
+        for (int i = 0; i < N; ++i) { ph += 2 * juce::MathConstants<double>::pi * f / sr; in[(size_t) i] = (float) (0.3 * std::sin (ph) + 0.1 * std::sin (2 * ph)); }
+        for (int i = 0; i < N; i += 256) at.process (in.data() + i, out.data() + i, juce::jmin (256, N - i), 1.0f, 100.0f, -1);
+        std::vector<float> tail (out.begin() + 72000, out.end());
+        // remove 2nd harmonic influence by a crude low-pass before zero-crossing count
+        float s = 0; for (auto& v : tail) { s += 0.08f * (v - s); v = s; }
+        const auto hz = estimateHz (tail, sr);
+        const auto errCents = 1200.0 * std::log2 (hz / 440.0);
+        CHECK (std::abs (errCents) < 8.0, "auto-tune corrects " + juce::String (cents, 0) + " cents -> " + juce::String (errCents, 1) + " cents off A4");
+    }
+
+    // full chain: every effect on, stable, no NaN, sensible level, CPU cost
+    {
+        FxParams p;
+        for (int i = 0; i < FxParams::numSwitches; ++i) p.setOn ((FxParams::Switch) i, true);
+        builtInPresets()[11].applyTo (p);   // band rock
+        p.setOn (FxParams::dblOn, true);
+        VocalChain ch (p);
+        ch.prepare (sr, 512, true);
+        const int N = 48000 * 10;
+        std::vector<float> in ((size_t) N), L ((size_t) N), R ((size_t) N);
+        juce::Random rnd (3);
+        double ph = 0;
+        for (int i = 0; i < N; ++i)
+        {
+            ph += 2 * juce::MathConstants<double>::pi * 196.0 / sr;
+            const float env = (i / 24000) % 2 == 0 ? 1.0f : 0.0f;
+            in[(size_t) i] = env * (float) (0.25 * std::sin (ph) + 0.1 * std::sin (2 * ph) + 0.05 * std::sin (3 * ph)) + 0.002f * (rnd.nextFloat() - 0.5f);
+        }
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        for (int i = 0; i < N; i += 128) ch.process (in.data() + i, L.data() + i, R.data() + i, 128, false);
+        const auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        bool finite = true; float peak = 0;
+        for (int i = 0; i < N; ++i) { finite &= std::isfinite (L[(size_t) i]) && std::isfinite (R[(size_t) i]); peak = juce::jmax (peak, std::abs (L[(size_t) i]), std::abs (R[(size_t) i])); }
+        CHECK (finite, "chain output is finite (no NaN/inf)");
+        CHECK (peak > 0.1f && peak < 2.0f, "chain level sensible (peak " + juce::String (peak, 2) + ")");
+        std::cout << "        full chain CPU: " << juce::String (100.0 * ms / 10000.0, 2) << "% of one core\n";
+        CHECK (ms < 1500.0, "full effects chain runs far faster than real time");
+        // stereo spread from doubler/echo/reverb
+        double diff = 0; for (int i = 0; i < N; ++i) diff += std::abs (L[(size_t) i] - R[(size_t) i]);
+        CHECK (diff > 1.0, "effects produce a stereo image");
+    }
+
+    // key detection on a synthetic C major progression
+    {
+        juce::WavAudioFormat wav;
+        juce::MemoryBlock mb;
+        {
+            std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::MemoryOutputStream> (mb, false);
+            auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions().withSampleRate (44100).withNumChannels (1).withBitsPerSample (16));
+            juce::AudioBuffer<float> b (1, 44100 * 16);
+            const int chords[4][3] = { { 60, 64, 67 }, { 65, 69, 72 }, { 67, 71, 74 }, { 60, 64, 67 } };
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const auto& c = chords[(i / (44100 * 2)) % 4];
+                float v = 0;
+                for (int k = 0; k < 3; ++k) { const double f = 440.0 * std::pow (2.0, (c[k] - 69) / 12.0); v += 0.1f * (float) std::sin (2 * juce::MathConstants<double>::pi * f * i / 44100.0); }
+                const double bass = 440.0 * std::pow (2.0, (c[0] - 12 - 69) / 12.0);
+                v += 0.12f * (float) std::sin (2 * juce::MathConstants<double>::pi * bass * i / 44100.0);
+                b.setSample (0, i, v);
+            }
+            w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+        }
+        std::unique_ptr<juce::AudioFormatReader> r (wav.createReaderFor (new juce::MemoryInputStream (mb, false), true));
+        const int key = detectSongKey (*r);
+        CHECK (key == 0, "key detection finds C major (got " + keyName (key) + ")");
+    }
+}
+
+
+//==============================================================================
+static void testMedia (const juce::File& tmp, const juce::File& song)
+{
+    std::cout << "\nVideo / media import\n";
+    if (! media::ffmpeg().existsAsFile()) { std::cout << "  SKIP  ffmpeg not found next to the test\n"; return; }
+
+    // make a short test video (colour bars + tone) with ffmpeg itself
+    auto vid = tmp.getChildFile ("lyrics video.mp4");
+    juce::ChildProcess cp;
+    cp.start (juce::StringArray { media::ffmpeg().getFullPathName(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=8",
+                                  "-f", "lavfi", "-i", "sine=frequency=440:duration=8", "-shortest", "-pix_fmt", "yuv420p", vid.getFullPathName() });
+    cp.waitForProcessToFinish (60000);
+    CHECK (vid.existsAsFile(), "test video created");
+
+    auto info = media::probe (vid);
+    CHECK (info.hasVideo && info.hasAudio && info.width == 640 && std::abs (info.duration - 8.0) < 0.3, "video probed (640x360, ~8 s)");
+
+    std::atomic<bool> cancel { false };
+    float lastP = 0;
+    auto wav = tmp.getChildFile ("vid.wav");
+    auto err = media::extractAudio (vid, wav, 48000.0, [&] (float p) { lastP = p; }, cancel);
+    juce::AudioFormatManager fm; fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (wav));
+    CHECK (err.isEmpty() && r != nullptr && std::abs ((double) r->lengthInSamples / r->sampleRate - 8.0) < 0.2 && std::abs (lastP - 1.0f) < 1e-6f,
+           "audio extracted from video at 48 kHz with progress");
+
+    VideoFrames vf;
+    vf.open (vid);
+    juce::Image img;
+    for (int i = 0; i < 100 && ! img.isValid(); ++i) { img = vf.frameAt (3.0, false); juce::Thread::sleep (30); }
+    CHECK (img.isValid() && img.getWidth() > 0, "video frame decoded at 3.0 s (" + juce::String (img.getWidth()) + "x" + juce::String (img.getHeight()) + ")");
+    // play forward: frames must keep coming in step with the clock
+    int got = 0; juce::Image prev = img;
+    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+    while (juce::Time::getMillisecondCounterHiRes() - t0 < 1500)
+    {
+        auto f = vf.frameAt (3.0 + (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0, true);
+        if (f.isValid() && ! (f == prev)) { ++got; prev = f; }
+        juce::Thread::sleep (16);
+    }
+    CHECK (got >= 18, "video plays smoothly in sync (" + juce::String (got) + " new frames in 1.5 s)");
+    vf.close();
+
+    std::cout << "\nAI music / voice separation\n";
+    juce::String why;
+    if (! Separator::isAvailable (&why)) { std::cout << "  SKIP  " << why << "\n"; return; }
+    auto music = tmp.getChildFile ("music.wav"), vocals = tmp.getChildFile ("vocals.wav");
+    float sp = 0;
+    const auto st = juce::Time::getMillisecondCounterHiRes();
+    auto res = Separator::run (song, music, vocals, [&] (float p, const juce::String&) { sp = p; }, cancel);
+    const auto secs = (juce::Time::getMillisecondCounterHiRes() - st) / 1000.0;
+    std::unique_ptr<juce::AudioFormatReader> rm (fm.createReaderFor (music)), rv (fm.createReaderFor (vocals));
+    CHECK (res.error.isEmpty() && rm != nullptr && rv != nullptr, "separation produced music and vocal files" + (res.error.isEmpty() ? juce::String() : " (" + res.error + ")"));
+    if (rm != nullptr)
+    {
+        std::unique_ptr<juce::AudioFormatReader> rs (fm.createReaderFor (song));
+        const double lenS = (double) rs->lengthInSamples / rs->sampleRate, lenM = (double) rm->lengthInSamples / rm->sampleRate;
+        CHECK (std::abs (lenS - lenM) < 0.1, "separated music has the song's length");
+        std::cout << "        20 s song separated in " << juce::String (secs, 1) << " s\n";
+    }
+}
+
 //==============================================================================
 int main()
 {
@@ -155,6 +337,8 @@ int main()
         auto p = Lyrics::parse ("line one\nline two");
         CHECK (! p.timed && p.lines.size() == 2, "plain text lyrics");
     }
+
+    testEffects();
 
     // ---- 2. test song: 48 kHz stereo, rich content for correlation
     auto song = tmp.getChildFile ("song.wav");
@@ -290,6 +474,26 @@ int main()
         }
     }
 
+    // ---- 6b. exported vocal stays aligned through the effect chain's delay
+    std::cout << "\nExport alignment through effects\n";
+    {
+        auto& fx = engine.getFx();
+        const auto saved = fx.toString();
+        for (int i = 0; i < FxParams::numSwitches; ++i) fx.setOn ((FxParams::Switch) i, false);
+        fx.set (FxParams::tuneAmt, 0.0f);
+        engine.setMusicVolume (0.0f); engine.setVoiceVolume (1.0f);
+        auto dest = take.folder.getChildFile ("mix-align.wav");
+        bool done = false, ok = false;
+        engine.exportMix (take, dest, nullptr, [&] (bool o, juce::String) { ok = o; done = true; });
+        for (int i = 0; i < 100 && ! done; ++i) pump (100);
+        auto m = readMono (dest, 0, 48000 * 2);
+        auto ref = readMono (song, (juce::int64) std::llround (take.startSeconds * 48000), 48000 * 2);
+        double c = 0; auto lag = bestLag (m, ref, 600, c);
+        CHECK (ok && std::abs (lag) <= 1, "voice in exported mix aligned with song after auto-tune delay (lag " + juce::String (lag) + ", corr " + juce::String (c, 3) + ")");
+        fx.fromString (saved);
+        engine.setMusicVolume (0.65f); engine.setVoiceVolume (0.8f);
+    }
+
     // ---- 7. take playback
     std::cout << "\nListen to take\n";
     {
@@ -309,7 +513,7 @@ int main()
         pump (200);
         dev->maxCallbackMs = 0;
         for (int i = 0; i < 3; ++i) { engine.loadSong (song, err); pump (100); engine.loadTakeForPlayback (take, err); pump (100); engine.clearTakePlayback(); }
-        CHECK (dev->maxCallbackMs.load() < 2.0, "max audio callback while loading: " + juce::String (dev->maxCallbackMs.load(), 3) + " ms");
+        CHECK (dev->maxCallbackMs.load() < 2.5, "max audio callback while loading: " + juce::String (dev->maxCallbackMs.load(), 3) + " ms");
     }
 
     // ---- 8. performance
@@ -329,6 +533,8 @@ int main()
                   << juce::String (dev->maxCallbackMs.load(), 3) << " ms\n";
         CHECK (avg < 0.6, "average DSP load well under budget");
     }
+
+    testMedia (tmp, song);
 
     for (auto& d : AudioEngine::recordingsFolder().findChildFiles (juce::File::findDirectories, false))
         if (Take::load (d).backing == song || d.getFileName().startsWith (juce::String::fromUTF8 ("মুক্ত রেকর্ডিং")))

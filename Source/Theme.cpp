@@ -73,6 +73,8 @@ namespace icons
     juce::Path music()        { return svg ("M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"); }
     juce::Path search()       { return svg ("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-3.5-3.5"); }
     juce::Path sparkle()      { return svg ("M12 3l1.8 4.7L18.5 9l-4.7 1.8L12 15.5l-1.8-4.7L5.5 9l4.7-1.3z"); }
+    juce::Path mic()          { return svg ("M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v3"); }
+    juce::Path wand()         { return svg ("M15 4V2 M15 16v-2 M8 9h2 M20 9h2 M17.8 11.8l1.4 1.4 M15 9h0 M17.8 6.2l1.4-1.4 M3 21l9-9 M12.2 6.2l-1.4-1.4"); }
 }
 
 void drawIcon (juce::Graphics& g, const juce::Path& p24, juce::Rectangle<float> area, juce::Colour c, bool filled, float strokeWidth)

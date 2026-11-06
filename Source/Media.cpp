@@ -1,0 +1,433 @@
+#include "Media.h"
+#include "../third_party/sherpa-onnx/c-api.h"
+
+namespace tf
+{
+//==============================================================================
+namespace media
+{
+    static juce::File appDir() { return juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory(); }
+
+    juce::File ffmpeg()
+    {
+       #if JUCE_WINDOWS
+        return appDir().getChildFile ("ffmpeg.exe");
+       #else
+        for (auto p : { appDir().getChildFile ("ffmpeg"), juce::File ("/usr/local/bin/ffmpeg"), juce::File ("/usr/bin/ffmpeg") })
+            if (p.existsAsFile()) return p;
+        return {};
+       #endif
+    }
+
+    juce::String audioExtensions() { return "mp3;wav;m4a;aac;flac;ogg;opus;wma;aif;aiff"; }
+    juce::String videoExtensions() { return "mp4;mkv;webm;mov;avi;wmv;flv;m4v;3gp;mpg;mpeg;ts"; }
+
+    juce::String allPatterns()
+    {
+        juce::StringArray p;
+        for (auto& e : juce::StringArray::fromTokens (audioExtensions() + ";" + videoExtensions(), ";", "")) p.add ("*." + e);
+        return p.joinIntoString (";");
+    }
+
+    bool isVideo (const juce::File& f) { return f.hasFileExtension (videoExtensions()); }
+
+    static juce::String runAndCapture (const juce::StringArray& args, int timeoutMs)
+    {
+        juce::ChildProcess cp;
+        if (! cp.start (args, juce::ChildProcess::wantStdOut | juce::ChildProcess::wantStdErr)) return {};
+        auto out = cp.readAllProcessOutput();
+        cp.waitForProcessToFinish (timeoutMs);
+        return out;
+    }
+
+    ProbeInfo probe (const juce::File& f)
+    {
+        ProbeInfo info;
+        auto exe = ffmpeg();
+        if (! exe.existsAsFile()) return info;
+        auto out = runAndCapture ({ exe.getFullPathName(), "-hide_banner", "-nostdin", "-i", f.getFullPathName() }, 15000);
+        auto d = out.fromFirstOccurrenceOf ("Duration: ", false, false).upToFirstOccurrenceOf (",", false, false).trim();
+        auto parts = juce::StringArray::fromTokens (d, ":", "");
+        if (parts.size() == 3)
+            info.duration = parts[0].getIntValue() * 3600.0 + parts[1].getIntValue() * 60.0 + parts[2].getDoubleValue();
+        for (auto line : juce::StringArray::fromLines (out))
+        {
+            if (line.contains ("Stream #") && line.contains ("Video:") && ! line.contains ("attached pic"))
+            {
+                info.hasVideo = true;
+                for (auto tok : juce::StringArray::fromTokens (line, " ,", ""))
+                {
+                    auto x = tok.indexOfChar ('x');
+                    if (x > 0 && tok.substring (0, x).containsOnly ("0123456789") && tok.substring (x + 1).containsOnly ("0123456789")
+                        && tok.substring (0, x).getIntValue() > 15)
+                    {
+                        info.width = tok.substring (0, x).getIntValue();
+                        info.height = tok.substring (x + 1).getIntValue();
+                        break;
+                    }
+                }
+            }
+            if (line.contains ("Stream #") && line.contains ("Audio:")) info.hasAudio = true;
+        }
+        return info;
+    }
+
+    juce::File cacheFor (const juce::File& m)
+    {
+        auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                       .getChildFile ("TF Vocal Studio").getChildFile ("AudioCache");
+        dir.createDirectory();
+        auto key = m.getFullPathName() + "|" + juce::String (m.getSize()) + "|" + juce::String (m.getLastModificationTime().toMilliseconds());
+        return dir.getChildFile (juce::File::createLegalFileName (m.getFileNameWithoutExtension()).substring (0, 40)
+                                 + "-" + juce::String::toHexString (key.hashCode64()) + ".wav");
+    }
+
+    bool canReadDirectly (const juce::File& f, juce::AudioFormatManager& fm)
+    {
+        if (isVideo (f)) return false;
+        std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (f));
+        return r != nullptr && r->lengthInSamples > 0;
+    }
+
+    juce::String extractAudio (const juce::File& in, const juce::File& outWav, double sampleRate,
+                               std::function<void (float)> progress, std::atomic<bool>& cancel)
+    {
+        auto exe = ffmpeg();
+        if (! exe.existsAsFile()) return juce::String::fromUTF8 ("ffmpeg পাওয়া যায়নি — সফটওয়্যারটি আবার ইনস্টল করুন।");
+        const auto info = probe (in);
+        if (! info.hasAudio) return juce::String::fromUTF8 ("এই ফাইলে কোনো আওয়াজ (অডিও) নেই।");
+
+        auto tmp = outWav.getSiblingFile (outWav.getFileNameWithoutExtension() + ".part.wav");
+        tmp.deleteFile();
+        juce::ChildProcess cp;
+        juce::StringArray args { exe.getFullPathName(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                                 "-i", in.getFullPathName(), "-vn", "-sn", "-ac", "2", "-ar", juce::String ((int) sampleRate),
+                                 "-c:a", "pcm_s16le", "-progress", "pipe:1", "-nostats", tmp.getFullPathName() };
+        if (! cp.start (args, juce::ChildProcess::wantStdOut))
+            return juce::String::fromUTF8 ("ffmpeg চালু করা যায়নি।");
+
+        juce::String pending;
+        char buf[512];
+        for (;;)
+        {
+            if (cancel.load()) { cp.kill(); tmp.deleteFile(); return juce::String::fromUTF8 ("বাতিল করা হয়েছে।"); }
+            const int n = cp.readProcessOutput (buf, sizeof (buf));
+            if (n <= 0) break;
+            pending += juce::String (juce::CharPointer_UTF8 (buf), (size_t) n);
+            while (pending.containsChar ('\n'))
+            {
+                auto line = pending.upToFirstOccurrenceOf ("\n", false, false).trim();
+                pending = pending.fromFirstOccurrenceOf ("\n", false, false);
+                if (line.startsWith ("out_time_us=") && info.duration > 0 && progress != nullptr)
+                    progress ((float) juce::jlimit (0.0, 1.0, line.substring (12).getLargeIntValue() / 1.0e6 / info.duration));
+            }
+        }
+        cp.waitForProcessToFinish (10000);
+        if (cp.getExitCode() != 0 || ! tmp.existsAsFile() || tmp.getSize() < 1000)
+        {
+            tmp.deleteFile();
+            return juce::String::fromUTF8 ("ফাইল থেকে অডিও বের করা যায়নি। ফাইলটি ঠিক আছে কিনা দেখুন।");
+        }
+        outWav.deleteFile();
+        tmp.moveFileTo (outWav);
+        if (progress) progress (1.0f);
+        return {};
+    }
+}
+
+//==============================================================================
+// VideoFrames
+//==============================================================================
+VideoFrames::VideoFrames() : juce::Thread ("TF video") {}
+VideoFrames::~VideoFrames() { close(); }
+
+void VideoFrames::open (const juce::File& video)
+{
+    close();
+    auto info = media::probe (video);
+    if (! info.hasVideo) return;
+    aspectRatio = (info.width > 0 && info.height > 0) ? (double) info.width / info.height : 16.0 / 9.0;
+    // decode at a size that looks sharp in the lyrics area but keeps the pipe light
+    const int maxW = info.width > 0 ? juce::jmin (1280, info.width) : 1280;
+    w = maxW & ~1; h = juce::roundToInt ((double) w / aspectRatio) & ~1;
+    if (h > 720) { h = 720; w = juce::roundToInt (720.0 * aspectRatio) & ~1; }
+    file = video;
+    requestedStart = -1.0;
+    lastAsked = -1.0;
+    currentTime = -1.0;
+    current = {};
+    startThread (juce::Thread::Priority::normal);
+}
+
+void VideoFrames::close()
+{
+    if (isThreadRunning())
+    {
+        signalThreadShouldExit();
+        restartFlag = true;
+        { const juce::ScopedLock sl (procLock); if (proc != nullptr) proc->kill(); }
+        spaceAvailable.signal();
+        stopThread (4000);
+    }
+    file = juce::File();
+    const juce::ScopedLock sl (lock);
+    queue.clear();
+    current = {};
+}
+
+void VideoFrames::restartAt (double seconds)
+{
+    {
+        const juce::ScopedLock sl (lock);
+        queue.clear();
+        currentTime = seconds;
+    }
+    requestedStart = juce::jmax (0.0, seconds);
+    restartFlag = true;
+    { const juce::ScopedLock sl (procLock); if (proc != nullptr) proc->kill(); }
+    spaceAvailable.signal();
+}
+
+juce::Image VideoFrames::frameAt (double t, bool playing)
+{
+    if (! isOpen()) return {};
+    bool needRestart = false;
+    {
+        const juce::ScopedLock sl (lock);
+        while (! queue.empty() && queue.front().first <= t + 0.5 / fps)
+        {
+            current = queue.front().second;
+            currentTime = queue.front().first;
+            queue.pop_front();
+            spaceAvailable.signal();
+        }
+        const bool jumpedBack = t < currentTime - 0.35;
+        const bool farBehind = queue.empty() && playing && t > currentTime + 1.5;
+        const bool farAhead = ! queue.empty() && queue.front().first > t + 1.5;
+        const bool seekedWhilePaused = ! playing && lastAsked >= 0 && std::abs (t - lastAsked) > 0.2;
+        needRestart = requestedStart.load() < 0 || jumpedBack || farBehind || farAhead || seekedWhilePaused;
+    }
+    lastAsked = t;
+    if (needRestart) restartAt (t);
+    const juce::ScopedLock sl (lock);
+    return current;
+}
+
+void VideoFrames::run()
+{
+    const int frameBytes = w * h * 4;
+    juce::HeapBlock<char> buf ((size_t) frameBytes);
+
+    while (! threadShouldExit())
+    {
+        const double start = requestedStart.load();
+        restartFlag = false;
+        if (start < 0) { wait (30); continue; }
+
+        {
+            const juce::ScopedLock sl (procLock);
+            proc = std::make_unique<juce::ChildProcess>();
+            juce::StringArray args { media::ffmpeg().getFullPathName(), "-hide_banner", "-nostdin", "-loglevel", "quiet",
+                                     "-ss", juce::String (start, 3), "-i", file.getFullPathName(), "-an", "-sn", "-dn",
+                                     "-vf", "scale=" + juce::String (w) + ":" + juce::String (h) + ",fps=" + juce::String (fps, 0),
+                                     "-pix_fmt", "bgra", "-f", "rawvideo", "pipe:1" };
+            if (! proc->start (args, juce::ChildProcess::wantStdOut)) { proc.reset(); wait (500); continue; }
+        }
+
+        juce::int64 idx = 0;
+        while (! threadShouldExit() && ! restartFlag.load())
+        {
+            int got = 0;
+            while (got < frameBytes)
+            {
+                const int r = proc->readProcessOutput (buf.get() + got, frameBytes - got);
+                if (r <= 0) break;
+                got += r;
+            }
+            if (got < frameBytes)
+            {
+                while (! threadShouldExit() && ! restartFlag.load()) wait (30);   // end of video: idle until a seek
+                break;
+            }
+            juce::Image img (juce::Image::ARGB, w, h, false, juce::SoftwareImageType());
+            {
+                juce::Image::BitmapData bd (img, juce::Image::BitmapData::writeOnly);
+                for (int y = 0; y < h; ++y)
+                    std::memcpy (bd.getLinePointer (y), buf.get() + (size_t) y * (size_t) w * 4, (size_t) w * 4);
+            }
+            const double t = start + (double) idx++ / fps;
+            {
+                const juce::ScopedLock sl (lock);
+                if (! restartFlag.load()) queue.emplace_back (t, img);
+            }
+            while (! threadShouldExit() && ! restartFlag.load())
+            {
+                { const juce::ScopedLock sl (lock); if (queue.size() < 8) break; }
+                spaceAvailable.wait (20);
+            }
+        }
+
+        const juce::ScopedLock sl (procLock);
+        if (proc != nullptr) { proc->kill(); proc.reset(); }
+    }
+}
+
+//==============================================================================
+// Separator (sherpa-onnx C API, loaded at run time)
+//==============================================================================
+namespace
+{
+    struct SherpaApi
+    {
+        juce::DynamicLibrary lib;
+        decltype (&SherpaOnnxCreateOfflineSourceSeparation) create = nullptr;
+        decltype (&SherpaOnnxDestroyOfflineSourceSeparation) destroy = nullptr;
+        decltype (&SherpaOnnxOfflineSourceSeparationProcess) process = nullptr;
+        decltype (&SherpaOnnxDestroySourceSeparationOutput) destroyOutput = nullptr;
+        bool ok = false;
+
+        SherpaApi()
+        {
+            auto dir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+           #if JUCE_WINDOWS
+            auto dll = dir.getChildFile ("sherpa-onnx-c-api.dll");
+           #else
+            auto dll = dir.getChildFile ("libsherpa-onnx-c-api.so");
+           #endif
+            if (! dll.existsAsFile() || ! lib.open (dll.getFullPathName())) return;
+            create = (decltype (create)) lib.getFunction ("SherpaOnnxCreateOfflineSourceSeparation");
+            destroy = (decltype (destroy)) lib.getFunction ("SherpaOnnxDestroyOfflineSourceSeparation");
+            process = (decltype (process)) lib.getFunction ("SherpaOnnxOfflineSourceSeparationProcess");
+            destroyOutput = (decltype (destroyOutput)) lib.getFunction ("SherpaOnnxDestroySourceSeparationOutput");
+            ok = create && destroy && process && destroyOutput;
+        }
+        static SherpaApi& get() { static SherpaApi a; return a; }
+    };
+
+    juce::File modelFile()
+    {
+        return juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory()
+                   .getChildFile ("models").getChildFile ("UVR-MDX-NET-Inst_HQ_3.onnx");
+    }
+}
+
+bool Separator::isAvailable (juce::String* whyNot)
+{
+    if (! modelFile().existsAsFile()) { if (whyNot) *whyNot = juce::String::fromUTF8 ("AI মডেল ফাইল পাওয়া যায়নি — সফটওয়্যারটি আবার ইনস্টল করুন।"); return false; }
+    if (! SherpaApi::get().ok)        { if (whyNot) *whyNot = juce::String::fromUTF8 ("AI ইঞ্জিন (sherpa-onnx) পাওয়া যায়নি — সফটওয়্যারটি আবার ইনস্টল করুন।"); return false; }
+    if (! media::ffmpeg().existsAsFile()) { if (whyNot) *whyNot = juce::String::fromUTF8 ("ffmpeg পাওয়া যায়নি — সফটওয়্যারটি আবার ইনস্টল করুন।"); return false; }
+    return true;
+}
+
+Separator::Result Separator::run (const juce::File& song, const juce::File& musicOut, const juce::File& vocalsOut,
+                                  std::function<void (float, const juce::String&)> progress, std::atomic<bool>& cancel)
+{
+    Result res;
+    if (! isAvailable (&res.error)) return res;
+    auto& api = SherpaApi::get();
+
+    // 1. decode the song to 44.1 kHz stereo (the model's rate)
+    auto tmp = juce::File::createTempFile (".wav");
+    if (progress) progress (0.0f, juce::String::fromUTF8 ("গান পড়া হচ্ছে…"));
+    res.error = media::extractAudio (song, tmp, 44100.0, [&] (float p) { if (progress) progress (p * 0.05f, juce::String::fromUTF8 ("গান পড়া হচ্ছে…")); }, cancel);
+    if (res.error.isNotEmpty()) { tmp.deleteFile(); return res; }
+
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (new juce::FileInputStream (tmp), true));
+    if (reader == nullptr) { tmp.deleteFile(); res.error = juce::String::fromUTF8 ("অডিও পড়া যায়নি।"); return res; }
+
+    // 2. create the AI engine
+    SherpaOnnxOfflineSourceSeparationConfig cfg;
+    std::memset (&cfg, 0, sizeof (cfg));
+    const auto modelPath = modelFile().getFullPathName().toStdString();
+    cfg.model.uvr.model = modelPath.c_str();
+    cfg.model.num_threads = juce::jlimit (1, 8, juce::SystemStats::getNumCpus() - 1);
+    cfg.model.provider = "cpu";
+    const auto* engine = api.create (&cfg);
+    if (engine == nullptr) { tmp.deleteFile(); res.error = juce::String::fromUTF8 ("AI মডেল চালু করা যায়নি।"); return res; }
+
+    auto makeWriter = [&wav] (const juce::File& f) -> std::unique_ptr<juce::AudioFormatWriter>
+    {
+        f.deleteFile();
+        std::unique_ptr<juce::OutputStream> os = std::make_unique<juce::FileOutputStream> (f);
+        return wav.createWriterFor (os, juce::AudioFormatWriterOptions().withSampleRate (44100).withNumChannels (2).withBitsPerSample (24));
+    };
+    auto musicW = makeWriter (musicOut);
+    auto vocalW = makeWriter (vocalsOut);
+    if (musicW == nullptr || vocalW == nullptr)
+    {
+        api.destroy (engine); tmp.deleteFile();
+        res.error = juce::String::fromUTF8 ("ফলাফল সেভ করা যাচ্ছে না।");
+        return res;
+    }
+
+    // 3. process in 30 s chunks with 2 s cross-faded overlaps (keeps memory low, gives progress)
+    const int sr = 44100, chunk = sr * 30, overlap = sr * 2;
+    const auto total = reader->lengthInSamples;
+    juce::AudioBuffer<float> in (2, chunk), tailM (2, overlap), tailV (2, overlap), outM (2, chunk), outV (2, chunk);
+    bool haveTail = false;
+    const int numChunks = (int) std::ceil ((double) juce::jmax ((juce::int64) 1, total - overlap) / (chunk - overlap));
+    int done = 0;
+
+    for (juce::int64 pos = 0; pos < total; pos += chunk - overlap)
+    {
+        if (cancel.load()) { res.error = juce::String::fromUTF8 ("বাতিল করা হয়েছে।"); break; }
+        const int n = (int) juce::jmin ((juce::int64) chunk, total - pos);
+        in.clear();
+        reader->read (&in, 0, n, pos, true, true);
+        const float* chans[2] = { in.getReadPointer (0), in.getReadPointer (1) };
+        const auto* out = api.process (engine, chans, 2, n, sr);
+        if (out == nullptr || out->num_stems < 2) { res.error = juce::String::fromUTF8 ("AI প্রসেস ব্যর্থ হয়েছে।"); if (out) api.destroyOutput (out); break; }
+
+        // stem 0 = model output (instrumental for this model), stem 1 = the rest (vocals)
+        outM.clear(); outV.clear();
+        for (int c = 0; c < 2; ++c)
+        {
+            const auto& sM = out->stems[0]; const auto& sV = out->stems[1];
+            const int m = juce::jmin (n, sM.n, sV.n);
+            std::memcpy (outM.getWritePointer (c), sM.samples[juce::jmin (c, sM.num_channels - 1)], sizeof (float) * (size_t) m);
+            std::memcpy (outV.getWritePointer (c), sV.samples[juce::jmin (c, sV.num_channels - 1)], sizeof (float) * (size_t) m);
+        }
+        api.destroyOutput (out);
+
+        const bool last = pos + n >= total;
+        int head = 0;
+        if (haveTail)
+        {
+            const int ov = juce::jmin (overlap, n);
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < ov; ++i)
+                {
+                    const float r = (float) i / (float) ov;
+                    outM.setSample (c, i, tailM.getSample (c, i) * (1.0f - r) + outM.getSample (c, i) * r);
+                    outV.setSample (c, i, tailV.getSample (c, i) * (1.0f - r) + outV.getSample (c, i) * r);
+                }
+            head = 0;
+        }
+        const int writeN = last ? n : n - overlap;
+        musicW->writeFromAudioSampleBuffer (outM, head, writeN);
+        vocalW->writeFromAudioSampleBuffer (outV, head, writeN);
+        if (! last)
+        {
+            for (int c = 0; c < 2; ++c)
+            {
+                tailM.copyFrom (c, 0, outM, c, n - overlap, overlap);
+                tailV.copyFrom (c, 0, outV, c, n - overlap, overlap);
+            }
+            haveTail = true;
+        }
+        ++done;
+        if (progress) progress (0.05f + 0.95f * (float) done / (float) numChunks, juce::String::fromUTF8 ("AI দিয়ে কণ্ঠ আর মিউজিক আলাদা করা হচ্ছে…"));
+        if (last) break;
+    }
+
+    api.destroy (engine);
+    musicW.reset(); vocalW.reset();
+    reader.reset();
+    tmp.deleteFile();
+    if (res.error.isNotEmpty()) { musicOut.deleteFile(); vocalsOut.deleteFile(); return res; }
+    res.music = musicOut;
+    res.vocals = vocalsOut;
+    return res;
+}
+}

@@ -4,6 +4,9 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+#ifndef BundleDir
+  #define BundleDir "..\bundle"
+#endif
 #ifndef SourceExe
   #define SourceExe "..\build\TFVocalStudio_artefacts\Release\TF Vocal Studio.exe"
 #endif
@@ -44,6 +47,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "TF Vocal Studio.exe"; Flags: ignoreversion
 Source: "..\LICENSE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+; ffmpeg (video/audio import), AI separation engine + model
+Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\TF Vocal Studio"; Filename: "{app}\TF Vocal Studio.exe"

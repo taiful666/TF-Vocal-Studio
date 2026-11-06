@@ -3,29 +3,63 @@
 #include "Theme.h"
 #include "AudioEngine.h"
 #include "Lyrics.h"
+#include "Media.h"
+#include "FxPanel.h"
 
 namespace tf
 {
 //==============================================================================
+/** Lyrics area: synced video, karaoke (.lrc) or a teleprompter for plain text lyrics. */
 class LyricsView : public juce::Component
 {
 public:
-    explicit LyricsView (AudioEngine& e);
+    LyricsView (AudioEngine& e, juce::PropertiesFile& p);
     void setLyrics (Lyrics l);
+    void setVideo (const juce::File& videoOrNone);
+    bool hasVideo() const { return video.isOpen(); }
+    bool hasLyrics() const { return ! lyrics.isEmpty(); }
+    bool isTeleprompter() const { return ! lyrics.isEmpty() && ! lyrics.timed; }
+
+    enum class Mode { video, lyrics };
+    void setMode (Mode m) { mode = m; repaint(); }
+    Mode getMode() const { return mode; }
+
+    void changeFontSize (float delta);
+    void changeSpeed (float delta);
+    float getSpeed() const { return speed; }
+    void resetScroll() { manualOffset = 0.0f; }
+
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
 
-    TFButton openLibrary { juce::String::fromUTF8 ("লাইব্রেরি থেকে গান বাছুন"), TFButton::Style::accent };
-    TFButton openFile    { juce::String::fromUTF8 ("ফাইল থেকে খুলুন"), TFButton::Style::tool };
+    TFButton addMedia     { juce::String::fromUTF8 ("অডিও / ভিডিও যোগ করুন"), TFButton::Style::accent };
+    TFButton openLibrary  { juce::String::fromUTF8 ("লাইব্রেরি থেকে বাছুন"), TFButton::Style::tool };
+    TFButton writeLyrics  { juce::String::fromUTF8 ("লিরিক্স লিখুন বা পেস্ট করুন"), TFButton::Style::accent };
 
 private:
     void tick();
+    void paintKaraoke (juce::Graphics&, juce::Rectangle<float>);
+    void paintTeleprompter (juce::Graphics&, juce::Rectangle<float>);
     void drawLine (juce::Graphics&, const juce::String&, float centreY, float size, float alpha, double progress, bool current);
+    void rebuildLayout();
+    float pixelsPerSecond() const;
 
     AudioEngine& engine;
+    juce::PropertiesFile& props;
     Lyrics lyrics;
+    VideoFrames video;
+    Mode mode = Mode::lyrics;
+
     float scrollIdx = 0.0f;
+    float fontSize = 34.0f, speed = 1.0f;
+    float manualOffset = 0.0f, dragStartOffset = 0.0f;
+    juce::TextLayout layout;
+    float layoutWidth = 0.0f, layoutFont = 0.0f;
     double lastTick = 0;
+    juce::Image lastFrame;
     juce::VBlankAttachment vblank { this, [this] { tick(); } };
 };
 
@@ -35,7 +69,7 @@ class WaveformView : public juce::Component, private juce::ChangeListener
 public:
     explicit WaveformView (AudioEngine& e);
     ~WaveformView() override;
-    void setSong (const juce::File& f);
+    void setSong (const juce::File& audio);
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -57,102 +91,41 @@ private:
 };
 
 //==============================================================================
-class LevelMeter : public juce::Component
+/** In-place editor for typing/pasting lyrics. */
+class LyricsEditor : public juce::Component
 {
 public:
-    void setLevel (float peak);      // linear peak, called ~30 Hz
+    LyricsEditor();
+    void open (const juce::String& text);
     void paint (juce::Graphics&) override;
+    void resized() override;
+    std::function<void (const juce::String&)> onSave;
+    std::function<void()> onCancel;
+    juce::TextEditor editor;
 private:
-    float shown = 0.0f, hold = 0.0f;
-    int holdFrames = 0;
+    TFButton save { juce::String::fromUTF8 ("সেভ করুন"), TFButton::Style::accent },
+             cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool },
+             fromFile { juce::String::fromUTF8 ("ফাইল থেকে আনুন"), TFButton::Style::tool };
+    std::unique_ptr<juce::FileChooser> chooser;
 };
 
 //==============================================================================
-/** Row with a label (and optional note) and a switch on the right. */
-class SwitchRow : public juce::Component
+/** Progress overlay for long jobs (importing a video, AI separation). */
+class ProgressOverlay : public juce::Component, private juce::Timer
 {
 public:
-    SwitchRow (const juce::String& label, const juce::String& note = {});
-    TFSwitch sw;
+    ProgressOverlay();
+    void show (const juce::String& title);
+    void setProgress (float p, const juce::String& detail = {});
     void paint (juce::Graphics&) override;
     void resized() override;
-    void setNote (const juce::String& n) { note = n; repaint(); }
+    void visibilityChanged() override { if (! isVisible()) stopTimer(); }
+    std::function<void()> onCancel;
 private:
-    juce::String text, note;
-};
-
-//==============================================================================
-/** Collapsible effect row: chevron + name + summary (+ on/off switch). Click to expand. */
-class FxSection : public juce::Component
-{
-public:
-    FxSection (const juce::String& title, bool hasSwitch);
-    void addItem (juce::Component& c, int height);
-    void setExpanded (bool e, bool animate = true);
-    bool isExpanded() const { return expanded; }
-    int getDesiredHeight() const;
-    void refreshHeader() { header.repaint(); }
-
-    std::function<juce::String()> summary;
-    std::function<void()> onLayoutChange;
-    std::function<void (FxSection*)> onExpand;
-    TFSwitch sw;
-
-    void resized() override;
-    void paint (juce::Graphics&) override;
-
-private:
-    struct Header : public juce::Button
-    {
-        explicit Header (FxSection& o) : juce::Button ("header"), owner (o) { setMouseCursor (juce::MouseCursor::PointingHandCursor); setMouseClickGrabsKeyboardFocus (false); }
-        void paintButton (juce::Graphics&, bool over, bool down) override;
-        FxSection& owner;
-    };
-
-    juce::String title;
-    bool hasSwitch;
-    bool expanded = false;
-    Header header { *this };
-    Smoother anim;
-    juce::Array<std::pair<juce::Component*, int>> items;
-    int contentHeight() const;
-};
-
-//==============================================================================
-class RightColumn : public juce::Component
-{
-public:
-    RightColumn (AudioEngine&, juce::PropertiesFile&);
-    void updateLayout();
-    void resized() override;
-    void paint (juce::Graphics&) override;
-    void updateMeters();
-    void refreshAvailability();
-
-private:
-    AudioEngine& engine;
-    juce::PropertiesFile& props;
-
-    // meters card
-    LevelMeter micMeter, outMeter;
-    juce::String micStatus;
-    juce::Colour micStatusColour = col::okText;
-    int silentFrames = 0, loudFrames = 0;
-    juce::Rectangle<int> meterCard, fxCard;
-
-    // effects
-    FxSection noiseSec { juce::String::fromUTF8 ("AI নয়েজ রিমুভ"), true };
-    FxSection gainSec  { juce::String::fromUTF8 ("মাইক গেইন"), false };
-    FxSection mixSec   { juce::String::fromUTF8 ("ভলিউম মিক্স"), false };
-
-    LabeledSlider noiseAmt { juce::String::fromUTF8 ("পরিমাণ"), 0, 100, 80, [] (double v) { return bn ((int) std::round (v)) + "%"; } };
-    SwitchRow noiseMonitor { juce::String::fromUTF8 ("স্পিকারেও পরিষ্কার কণ্ঠ শুনুন"), juce::String::fromUTF8 ("চালু করলে ১০ ms দেরি বাড়ে") };
-    LabeledSlider gain { juce::String::fromUTF8 ("মাইকের জোর"), -12, 24, 0, [] (double v) { return (v > 0.05 ? "+" : "") + bn (juce::String (v, 1)) + " dB"; } };
-    LabeledSlider voice { juce::String::fromUTF8 ("কণ্ঠ"), 0, 100, 80, [] (double v) { return bn ((int) std::round (v)) + "%"; } };
-    LabeledSlider music { juce::String::fromUTF8 ("মিউজিক"), 0, 100, 65, [] (double v) { return bn ((int) std::round (v)) + "%"; } };
-    SwitchRow monitor { juce::String::fromUTF8 ("স্পিকারে নিজের কণ্ঠ শুনুন") };
-
-    std::array<FxSection*, 3> sections { &noiseSec, &gainSec, &mixSec };
+    void timerCallback() override { phase += 0.02f; if (phase > 1.0f) phase -= 1.0f; repaint(); }
+    juce::String title, detail;
+    float progress = 0.0f, phase = 0.0f;
+    TFButton cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool };
 };
 
 //==============================================================================
@@ -165,12 +138,13 @@ public:
     StudioView (AudioEngine&, juce::PropertiesFile&);
     ~StudioView() override;
 
-    void loadSong (const juce::File& f);
+    void loadSong (const juce::File& f);   // any audio or video file (imports when needed)
     void loadTake (const Take& t);
     void togglePlay();
     void toggleRecord();
     void goToStart();
     void chooseFile();
+    bool isBusy() const { return importing.load(); }
 
     std::function<void()> onOpenLibrary;
     std::function<void (const juce::String&)> toast;
@@ -185,16 +159,32 @@ private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void timerCallback() override;
     void updateTransportButtons();
+    void updateToolbar();
     void showSaveMenu();
     void showError (const juce::String& msg);
+    void importAndLoad (const juce::File& f, bool copyToLibrary);
+    void songLoaded (const juce::File& f);
+    void openLyricsEditor();
+    void saveLyrics (const juce::String& text);
 
     AudioEngine& engine;
     juce::PropertiesFile& props;
     Lyrics lyrics;
 
-    juce::Rectangle<int> lyricsCard, waveCard, transportCard, timeArea;
-    LyricsView lyricsView { engine };
+    juce::Rectangle<int> lyricsCard, waveCard, transportCard, timeArea, headArea;
+    LyricsView lyricsView { engine, props };
     WaveformView waveform { engine };
+    LyricsEditor lyricsEditor;
+    ProgressOverlay overlay;
+
+    // lyrics toolbar
+    TFButton viewVideo { juce::String::fromUTF8 ("ভিডিও"), TFButton::Style::segment },
+             viewLyrics { juce::String::fromUTF8 ("লিরিক্স"), TFButton::Style::segment },
+             editLyricsBtn { juce::String::fromUTF8 ("লিরিক্স") },
+             fontDown { juce::String::fromUTF8 ("অ−") }, fontUp { juce::String::fromUTF8 ("অ+") },
+             slower { juce::String::fromUTF8 ("−") }, faster { "+" },
+             changeSong { juce::String::fromUTF8 ("গান বদলান") };
+    juce::Rectangle<int> viewWell, speedArea;
 
     TFButton toStartBtn { juce::String::fromUTF8 ("শুরুতে যান") }, stopBtn { juce::String::fromUTF8 ("থামান") },
              playBtn { juce::String::fromUTF8 ("চালান"), TFButton::Style::primary },
@@ -203,10 +193,12 @@ private:
              saveBtn { juce::String::fromUTF8 ("সেভ / এক্সপোর্ট") };
 
     juce::Viewport rightViewport;
-    RightColumn right { engine, props };
+    FxPanel right { engine, props };
 
     std::unique_ptr<juce::FileChooser> chooser;
     float exportProgress = -1.0f;
     bool wasPlaying = false;
+    std::atomic<bool> importing { false }, importCancel { false };
+    juce::ThreadPool jobs { juce::ThreadPoolOptions().withThreadName ("TF import").withNumberOfThreads (1) };
 };
 }

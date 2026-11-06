@@ -22,7 +22,7 @@ public:
 
     void openFile (const juce::File&);
     void showToast (const juce::String& text);
-    bool canQuit() const { return ! engine.isRecording() && ! engine.isExporting(); }
+    bool canQuit() const { return ! engine.isRecording() && ! engine.isExporting() && ! studio.isBusy(); }
     void stopEverything() { engine.stop(); }
 
 private:
@@ -31,6 +31,8 @@ private:
     void showPage (int index);
     void showSettings();
     void saveDeviceState();
+    void toggleLive();
+    void updateLiveButton();
 
     juce::PropertiesFile& props;
     AudioEngine engine;
@@ -39,7 +41,8 @@ private:
     juce::Image logo;
     TFButton studioTab { juce::String::fromUTF8 ("স্টুডিও"), TFButton::Style::segment },
              libraryTab { juce::String::fromUTF8 ("গানের লাইব্রেরি"), TFButton::Style::segment },
-             settingsBtn { juce::String::fromUTF8 ("অডিও সেটিংস") };
+             settingsBtn { juce::String::fromUTF8 ("অডিও সেটিংস") },
+             liveBtn { juce::String::fromUTF8 ("লাইভ মাইক বন্ধ") };
     juce::Rectangle<int> headerArea, tabWell, devicePill;
 
     StudioView studio { engine, props };

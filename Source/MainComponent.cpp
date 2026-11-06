@@ -66,6 +66,13 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
     studioTab.onClick = [this] { showPage (0); };
     libraryTab.onClick = [this] { showPage (1); };
 
+    liveBtn.setIcon (icons::mic(), false, 18.0f);
+    liveBtn.setRadius (10.0f);
+    liveBtn.setTooltip (u8 ("চালু করলে মাইকের কণ্ঠ ইফেক্টসহ স্পিকারে শোনা যাবে (L)। হেডফোন ছাড়া জোরে চালালে চিৎকার-আওয়াজ হতে পারে।"));
+    liveBtn.onClick = [this] { toggleLive(); };
+    addAndMakeVisible (liveBtn);
+    updateLiveButton();
+
     settingsBtn.setIcon (icons::gear(), false, 19.0f);
     settingsBtn.setTooltip (u8 ("মাইক, স্পিকার ও দেরি (latency) ঠিক করুন"));
     settingsBtn.onClick = [this] { showSettings(); };
@@ -80,7 +87,7 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
     library.onSing = [this] (const juce::File& f) { studio.loadSong (f); showPage (0); };
     library.onOpenTake = [this] (const Take& t) { showPage (0); studio.loadTake (t); };
 
-    toastAnim.onChange = [this] { repaint (getLocalBounds().removeFromBottom (110)); };
+    toastAnim.onChange = [this] { repaint (getLocalBounds().withHeight (140)); };
 
     auto last = juce::File (props.getValue ("lastSong"));
     if (last.existsAsFile()) studio.loadSong (last);
@@ -117,6 +124,21 @@ void MainComponent::timerCallback()
         toastAnim.setTarget (0.0f);
     }
     repaint (devicePill.expanded (4));
+}
+
+void MainComponent::toggleLive()
+{
+    engine.setMonitorEnabled (! engine.isMonitorEnabled());
+    updateLiveButton();
+    showToast (engine.isMonitorEnabled() ? u8 ("লাইভ মাইক চালু — আপনার কণ্ঠ স্পিকারে যাচ্ছে") : u8 ("লাইভ মাইক বন্ধ"));
+}
+
+void MainComponent::updateLiveButton()
+{
+    const bool on = engine.isMonitorEnabled();
+    liveBtn.setStyle (on ? TFButton::Style::record : TFButton::Style::tool);
+    liveBtn.setSelected (on);
+    liveBtn.setText (on ? u8 ("লাইভ মাইক চালু") : u8 ("লাইভ মাইক বন্ধ"));
 }
 
 void MainComponent::showPage (int index)
@@ -162,6 +184,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
 
     if (k == juce::KeyPress::spaceKey)                                  { studio.togglePlay(); return true; }
     if (k.getKeyCode() == 'R' || k.getKeyCode() == 'r')                 { if (studio.isVisible()) studio.toggleRecord(); return true; }
+    if (k.getKeyCode() == 'L' || k.getKeyCode() == 'l')                 { toggleLive(); return true; }
     if (k == juce::KeyPress::homeKey)                                    { studio.goToStart(); return true; }
     if (k == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { studio.chooseFile(); return true; }
     if (k == juce::KeyPress ('1', juce::ModifierKeys::commandModifier, 0)) { showPage (0); return true; }
@@ -196,6 +219,7 @@ void MainComponent::paint (juce::Graphics& g)
     g.drawRoundedRectangle (tabWell.toFloat().reduced (0.5f), 12.0f, 1.0f);
 
     // device pill
+    if (devicePill.isEmpty()) return;
     auto pr = devicePill.toFloat();
     g.setColour (juce::Colour (0xff181B22));
     g.fillRoundedRectangle (pr, 10.0f);
@@ -220,7 +244,7 @@ void MainComponent::paintOverChildren (juce::Graphics& g)
     if (a <= 0.001f || toastText.isEmpty()) return;
     g.setFont (font (15.0f, Weight::medium));
     auto w = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), toastText) + 64.0f;
-    auto r = juce::Rectangle<float> (w, 46.0f).withCentre ({ (float) getWidth() * 0.5f, (float) getHeight() - 60.0f + (1.0f - a) * 16.0f });
+    auto r = juce::Rectangle<float> (w, 46.0f).withCentre ({ (float) getWidth() * 0.5f, 100.0f - (1.0f - a) * 12.0f });
     g.setOpacity (a);
     g.setColour (juce::Colours::black.withAlpha (0.45f * a));
     g.fillRoundedRectangle (r.translated (0, 3), 14.0f);
@@ -241,14 +265,23 @@ void MainComponent::resized()
     auto h = headerArea.reduced (28, 0);
     settingsBtn.setBounds (h.removeFromRight (150).withSizeKeepingCentre (150, 44));
     h.removeFromRight (10);
-    devicePill = h.removeFromRight (juce::jmin (300, juce::jmax (180, h.getWidth() / 4))).withSizeKeepingCentre (juce::jmin (300, juce::jmax (180, h.getWidth() / 4)), 40);
+    liveBtn.setBounds (h.removeFromRight (168).withSizeKeepingCentre (168, 44));
+    h.removeFromRight (12);
 
+    // tabs centred when there is room, otherwise right after the logo
     const int wellW = 4 + 120 + 2 + 170 + 4;
-    tabWell = juce::Rectangle<int> (wellW, 46).withCentre (headerArea.getCentre());
+    const int logoEnd = h.getX() + 240;
+    int tabX = headerArea.getCentreX() - wellW / 2;
+    const int pillMin = 170;
+    if (tabX < logoEnd || tabX + wellW + 12 + pillMin > h.getRight()) tabX = logoEnd;
+    tabWell = juce::Rectangle<int> (tabX, headerArea.getCentreY() - 23, wellW, 46);
     auto tw = tabWell.reduced (4);
     studioTab.setBounds (tw.removeFromLeft (120));
     tw.removeFromLeft (2);
     libraryTab.setBounds (tw);
+
+    const int pillW = juce::jlimit (0, 280, h.getRight() - (tabWell.getRight() + 16));
+    devicePill = pillW >= 120 ? juce::Rectangle<int> (h.getRight() - pillW, headerArea.getCentreY() - 20, pillW, 40) : juce::Rectangle<int>();
 
     studio.setBounds (r);
     library.setBounds (r);

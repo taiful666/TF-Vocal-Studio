@@ -2,6 +2,7 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_dsp/juce_dsp.h>
+#include "VocalFx.h"
 
 struct DenoiseState;
 
@@ -117,7 +118,14 @@ public:
     static juce::File recordingsFolder();
 
     // ---- song (karaoke track)
+    /** f may be any audio or video file; video/unsupported formats must be imported first (cache). */
     bool loadSong (const juce::File& f, juce::String& error);
+    /** The decodable audio for a song file (itself, or its converted cache), or {} if it needs importing. */
+    static juce::File playableAudioFor (const juce::File& f, juce::AudioFormatManager& fm);
+    int getSongKey() const noexcept { return songKey.load(); }
+    bool isDetectingKey() const noexcept { return keyBusy.load(); }
+    FxParams& getFx() noexcept { return fx; }
+    bool isMonitorEnabled() const noexcept { return monitorOn.load(); }
     void unloadSong();
     juce::File getSongFile() const { return songFile; }
     double getSongLength() const noexcept { return songLength; }
@@ -236,13 +244,21 @@ private:
     juce::SmoothedValue<float> gainSm, voiceSm, musicSm, monitorSm;
 
     std::atomic<float> inputGainDb { 0.0f }, voiceVol { 0.8f }, musicVol { 0.65f }, noiseAmount { 0.8f }, userOffsetMs { 0.0f };
-    std::atomic<bool> monitorOn { true }, noiseOn { true }, noiseInMonitor { false };
+    std::atomic<bool> monitorOn { false }, noiseOn { true }, noiseInMonitor { false };
     std::atomic<float> inPeak { 0.0f }, outPeak { 0.0f };
     std::atomic<double> currentRate { 48000.0 };
     std::atomic<int> currentBlock { 0 };
     std::atomic<bool> exporting { false }, endReached { false };
 
     PeakTimeline vocalPeaks;
+
+    // vocal effects (non-destructive): live monitor chain and take-playback chain share the same settings
+    FxParams fx;
+    VocalChain monitorChain { fx }, playChain { fx };
+    juce::AudioBuffer<float> fxBuf, takeFxBuf;
+    std::atomic<int> songKey { -1 };
+    std::atomic<bool> keyBusy { false }, keyCancel { false };
+    std::unique_ptr<juce::ThreadPool> keyPool;
     std::unique_ptr<juce::ThreadPool> exportPool;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)

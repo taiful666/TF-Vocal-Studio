@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include <rnnoise.h>
+#include "Media.h"
 
 namespace tf
 {
@@ -77,10 +78,10 @@ Take Take::load (const juce::File& folder)
 class AudioEngine::TakeSource : public juce::PositionableAudioSource
 {
 public:
-    TakeSource (juce::AudioFormatReader* r, const Take& t)
+    TakeSource (juce::AudioFormatReader* r, const Take& t, juce::int64 chainLatency)
         : reader (r),
           startSample ((juce::int64) std::llround (t.startSeconds * r->sampleRate)),
-          offset (t.vocalOffset),
+          offset (t.vocalOffset + chainLatency),   // read ahead by the effect chain's delay so the result lines up
           totalTimeline (startSample + r->lengthInSamples + (juce::int64) (r->sampleRate * 3600.0)) {}
 
     void prepareToPlay (int, double) override {}
@@ -202,6 +203,15 @@ AudioEngine::AudioEngine()
     readAheadThread.startThread (juce::Thread::Priority::high);
     writerThread.startThread (juce::Thread::Priority::high);
     exportPool = std::make_unique<juce::ThreadPool> (juce::ThreadPoolOptions().withThreadName ("TF export").withNumberOfThreads (1));
+    keyPool = std::make_unique<juce::ThreadPool> (juce::ThreadPoolOptions().withThreadName ("TF key").withNumberOfThreads (1));
+}
+
+juce::File AudioEngine::playableAudioFor (const juce::File& f, juce::AudioFormatManager& fm)
+{
+    if (! f.existsAsFile()) return {};
+    if (media::canReadDirectly (f, fm)) return f;
+    auto c = media::cacheFor (f);
+    return c.existsAsFile() ? c : juce::File();
 }
 
 AudioEngine::~AudioEngine()
@@ -211,6 +221,8 @@ AudioEngine::~AudioEngine()
     deviceManager.removeChangeListener (this);
     deviceManager.closeAudioDevice();
     exportPool->removeAllJobs (true, 15000);
+    keyCancel = true;
+    keyPool->removeAllJobs (true, 5000);
     songTrack.reset();
     takeTrack.reset();
     readAheadThread.stopThread (2000);
@@ -265,10 +277,16 @@ bool AudioEngine::loadSong (const juce::File& f, juce::String& error)
 {
     if (recording.load()) { error = juce::String::fromUTF8 ("রেকর্ডিং চলার সময় গান বদলানো যাবে না।"); return false; }
 
-    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (f));
+    const auto audio = playableAudioFor (f, formatManager);
+    if (audio == juce::File())
+    {
+        error = "needs-import";
+        return false;
+    }
+    std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor (audio));
     if (reader == nullptr || reader->lengthInSamples <= 0 || reader->sampleRate <= 0)
     {
-        error = juce::String::fromUTF8 ("এই ফাইলটি খোলা যাচ্ছে না। MP3, WAV, M4A, FLAC বা OGG ফাইল দিন।");
+        error = juce::String::fromUTF8 ("এই ফাইলটি খোলা যাচ্ছে না। অন্য কোনো অডিও বা ভিডিও ফাইল দিন।");
         return false;
     }
 
@@ -295,6 +313,25 @@ bool AudioEngine::loadSong (const juce::File& f, juce::String& error)
     // old tracks are destroyed here, outside the audio lock
     songFile = f;
     vocalPeaks.clear();
+
+    // find the song's musical key in the background (auto-tune snaps to its scale)
+    songKey = -1;
+    keyCancel = true;
+    keyPool->removeAllJobs (true, 3000);
+    keyCancel = false;
+    keyBusy = true;
+    keyPool->addJob ([this, audio]
+    {
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        int k = -1;
+        if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (audio) })
+            k = detectSongKey (*r, &keyCancel);
+        if (! keyCancel.load()) songKey = k;
+        keyBusy = false;
+        sendChangeMessage();
+    });
+
     sendChangeMessage();
     return true;
 }
@@ -360,7 +397,7 @@ void AudioEngine::setPosition (double s)
     playhead = ph;
     endReached = false;
     if (songTrack != nullptr) songTrack->seek (ph, sr);
-    if (takeTrack != nullptr) takeTrack->seek (ph, sr);
+    if (takeTrack != nullptr) { takeTrack->seek (ph, sr); playChain.reset(); }
 }
 
 double AudioEngine::getPosition() const
@@ -506,7 +543,8 @@ bool AudioEngine::loadTakeForPlayback (const Take& t, juce::String& error)
     if (hasSong()) setPosition (t.startSeconds);
 
     const auto rate = reader->sampleRate;
-    auto track = makeTrack (std::make_unique<TakeSource> (reader.release(), t), rate, 1);
+    const auto chainLat = (juce::int64) std::llround (playChain.latencySamples (false) * rate / juce::jmax (1.0, currentRate.load()));
+    auto track = makeTrack (std::make_unique<TakeSource> (reader.release(), t, chainLat), rate, 1);
 
     std::unique_ptr<TimelineTrack> old;
     {
@@ -514,6 +552,7 @@ bool AudioEngine::loadTakeForPlayback (const Take& t, juce::String& error)
         old = std::move (takeTrack);
         takeTrack = std::move (track);
         takeTrack->seek (playhead.load(), currentRate.load());
+        playChain.reset();
         takeLoaded = true;
     }
     lastTake = t;
@@ -538,8 +577,11 @@ void AudioEngine::exportMix (const Take& t, const juce::File& dest,
 {
     if (exporting.exchange (true)) return;
     const float vVol = voiceVol.load(), mVol = musicVol.load();
+    const auto fxState = fx.toString();
+    const int key = fx.scaleKey.load();
+    const bool fxBypass = fx.bypass.load();
 
-    exportPool->addJob ([this, t, dest, progress, done, vVol, mVol]
+    exportPool->addJob ([this, t, dest, progress, done, vVol, mVol, fxState, key, fxBypass]
     {
         auto finish = [this, done] (bool ok, juce::String msg)
         {
@@ -556,7 +598,8 @@ void AudioEngine::exportMix (const Take& t, const juce::File& dest,
         const auto total = vocalR->lengthInSamples - t.vocalOffset;
         if (total <= 0) { finish (false, juce::String::fromUTF8 ("রেকর্ডিং খুব ছোট।")); return; }
 
-        std::unique_ptr<juce::AudioFormatReader> songR (t.backing.existsAsFile() ? fm.createReaderFor (t.backing) : nullptr);
+        const auto backingAudio = playableAudioFor (t.backing, fm);
+        std::unique_ptr<juce::AudioFormatReader> songR (backingAudio.existsAsFile() ? fm.createReaderFor (backingAudio) : nullptr);
         std::unique_ptr<juce::AudioFormatReaderSource> songSrc;
         std::unique_ptr<juce::ResamplingAudioSource> resampler;
         constexpr int block = 4096;
@@ -579,13 +622,32 @@ void AudioEngine::exportMix (const Take& t, const juce::File& dest,
         SafetyLimiter lim;
         lim.prepare (sr, juce::Decibels::decibelsToGain (-1.0f), 120.0f);
 
-        juce::AudioBuffer<float> mix (2, block), voc (1, block);
+        // the same vocal effects you hear, rendered offline at full quality
+        FxParams p;
+        p.fromString (fxState);
+        p.scaleKey = key;
+        p.bypass = fxBypass;
+        VocalChain chain (p);
+        chain.prepare (sr, block, true);
+        const int chainLat = chain.latencySamples (false);
+
+        juce::AudioBuffer<float> mix (2, block), voc (1, block), fxv (2, block);
+        // prime the chain so its delay is absorbed before the first output sample
+        for (int primed = 0; primed < chainLat; )
+        {
+            const int n = juce::jmin (block, chainLat - primed);
+            voc.clear();
+            vocalR->read (&voc, 0, n, t.vocalOffset + primed, true, false);
+            chain.process (voc.getReadPointer (0), fxv.getWritePointer (0), fxv.getWritePointer (1), n, false);
+            primed += n;
+        }
         int lastPct = -1;
         for (juce::int64 pos = 0; pos < total; pos += block)
         {
             const int n = (int) juce::jmin ((juce::int64) block, total - pos);
             voc.clear();
-            vocalR->read (&voc, 0, n, t.vocalOffset + pos, true, false);
+            vocalR->read (&voc, 0, n, t.vocalOffset + chainLat + pos, true, false);
+            chain.process (voc.getReadPointer (0), fxv.getWritePointer (0), fxv.getWritePointer (1), n, false);
             mix.clear();
             if (resampler != nullptr)
             {
@@ -593,8 +655,8 @@ void AudioEngine::exportMix (const Take& t, const juce::File& dest,
                 resampler->getNextAudioBlock (info);
                 mix.applyGain (0, n, mVol);
             }
-            mix.addFrom (0, 0, voc, 0, 0, n, vVol);
-            mix.addFrom (1, 0, voc, 0, 0, n, vVol);
+            mix.addFrom (0, 0, fxv, 0, 0, n, vVol);
+            mix.addFrom (1, 0, fxv, 1, 0, n, vVol);
             lim.process (mix.getWritePointer (0), mix.getWritePointer (1), n);
             writer->writeFromAudioSampleBuffer (mix, 0, n);
 
@@ -669,6 +731,10 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     nsBuf.setSize (1, maxBlock);
     songBuf.setSize (2, maxBlock);
     takeBuf.setSize (1, maxBlock);
+    fxBuf.setSize (2, maxBlock);
+    takeFxBuf.setSize (2, maxBlock);
+    monitorChain.prepare (sr, maxBlock, false);
+    playChain.prepare (sr, maxBlock, true);
 
     for (auto* t : { songTrack.get(), takeTrack.get() })
         if (t != nullptr) { t->prepare (sr, maxBlock); t->seek (playhead.load(), sr); }
@@ -780,14 +846,36 @@ void AudioEngine::processChunk (const float* const* in, int numIn, float* const*
         }
     }
 
-    // ---- 5. mix to output with safety limiter
+    // ---- 5. effects + mix to output with safety limiter
     voiceSm.setTargetValue (voiceVol.load());
     musicSm.setTargetValue (musicVol.load());
     monitorSm.setTargetValue (monitorOn.load() && ! takeActive ? 1.0f : 0.0f);
 
+    // live voice through the effect chain (only while the live mic is on or fading out)
+    float* vL = fxBuf.getWritePointer (0);
+    float* vR = fxBuf.getWritePointer (1);
+    const bool monitorAudible = monitorSm.getTargetValue() > 0.0f || monitorSm.isSmoothing() || monitorSm.getCurrentValue() > 0.0f;
+    if (monitorAudible)
+        monitorChain.process (monVocal, vL, vR, n, true);
+    else
+    {
+        juce::FloatVectorOperations::clear (vL, n);
+        juce::FloatVectorOperations::clear (vR, n);
+    }
+
+    // recorded take through the playback chain (same settings, non-destructive)
+    float* tL = takeFxBuf.getWritePointer (0);
+    float* tR = takeFxBuf.getWritePointer (1);
+    if (takeActive)
+        playChain.process (takeBuf.getReadPointer (0), tL, tR, n, false);
+    else
+    {
+        juce::FloatVectorOperations::clear (tL, n);
+        juce::FloatVectorOperations::clear (tR, n);
+    }
+
     const float* s0 = songBuf.getReadPointer (0);
     const float* s1 = songBuf.getReadPointer (1);
-    const float* tk = takeBuf.getReadPointer (0);
 
     float* L = numOut > 0 ? out[0] : nullptr;
     float* R = numOut > 1 ? out[1] : nullptr;
@@ -800,9 +888,8 @@ void AudioEngine::processChunk (const float* const* in, int numIn, float* const*
         const float voice = voiceSm.getNextValue();
         const float music = musicSm.getNextValue();
         const float mon = monitorSm.getNextValue();
-        const float vocal = monVocal[i] * voice * mon + tk[i] * voice;
-        const float l = s0[i] * music + vocal;
-        const float r = s1[i] * music + vocal;
+        const float l = s0[i] * music + (vL[i] * mon + tL[i]) * voice;
+        const float r = s1[i] * music + (vR[i] * mon + tR[i]) * voice;
         if (R != nullptr) { L[start + i] = l; R[start + i] = r; }
         else              { L[start + i] = 0.5f * (l + r); }
     }
