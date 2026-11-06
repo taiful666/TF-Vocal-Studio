@@ -16,6 +16,13 @@ struct ClipInfo
     double out = 0.0;       // end inside the file
     double length() const noexcept { return out - in; }
     double end() const noexcept { return start + length(); }
+
+    // recordings only
+    juce::File speaker;     // what the speakers played meanwhile (same timing): lets the music leak be removed
+    juce::File camera;      // camera video recorded with it (may be empty)
+    double cameraStart = 0; // timeline second of the camera video's first frame
+    juce::String label;     // takes: "টেক ৩"
+    double recordedAt = 0;  // takes: when (ms since 1970)
 };
 
 enum class TrackKind { music, vocal };
@@ -41,6 +48,10 @@ struct TrackInfo
     juce::File source;          // what the user added (audio or video) — lyrics/video belong to it
     juce::File baseAudio;       // decodable audio of the source at normal speed
     double speed = 1.0;         // tempo (pitch kept)
+    int semitones = 0;          // key change (speed kept)
+
+    // vocal tracks: every recording ever made on this track (to pick the best take of a part)
+    juce::Array<ClipInfo> takes;
 };
 
 struct ProjectState
@@ -48,6 +59,8 @@ struct ProjectState
     juce::String name;
     juce::Array<TrackInfo> tracks;
     int nextId = 1;
+    float smartMix = 1.0f;      // music steps back while singing (0 = off)
+    bool glue = true;           // master glue compressor
 
     double length() const;                       // end of the last clip
     int indexOf (const juce::String& trackId) const;
@@ -80,9 +93,22 @@ public:
     void removeTrack (const juce::String& trackId);
     /** Places a recording; anything already on that track in the same time range is replaced. */
     /** crossfade: the new part overlaps the old take on both sides (a re-sung part; the file has audio around it). */
-    void insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade = false);
+    void insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade = false,
+                          const juce::File& speakerRef = {}, const juce::File& camera = {}, double cameraStart = 0.0);
     void deleteRange (const juce::String& trackId, juce::Range<double> range);
     void moveClip (const juce::String& trackId, const juce::String& clipId, double newStart);
+    /** Splits the clip under this time into two clips. Returns false if there is no clip there. */
+    bool splitAt (const juce::String& trackId, double t);
+    void deleteClip (const juce::String& trackId, const juce::String& clipId);
+    /** Trims a clip's left (fromLeft) or right edge to timeline time t (the audio does not move). */
+    void trimClip (const juce::String& trackId, const juce::String& clipId, bool fromLeft, double t);
+    /** Puts take `take` (from the track's takes) in place for the time range of clip `clipId`. */
+    void useTake (const juce::String& trackId, const juce::String& clipId, const ClipInfo& take);
+    /** Replaces the audio file of clips (noise or leak removal): same timing, new file. */
+    void replaceClipFiles (const juce::String& trackId, const std::map<juce::String, juce::File>& oldToNew);
+    void setMix (float smartMix, bool glue);
+    /** Changes the key (semitones) and the audio of a music track together. */
+    void setMusicKey (const juce::String& trackId, const juce::File& newAudio, int semitones);
     void setTrack (const TrackInfo& t, bool undoable = true);
     /** Swaps the music audio (tempo-changed or vocal-removed copy). newBase: the new normal-speed audio, if it changed. */
     void replaceMusicAudio (const juce::String& trackId, const juce::File& newAudio, double newSpeed, const juce::File& newBase = {});

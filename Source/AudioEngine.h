@@ -4,24 +4,28 @@
 #include <juce_dsp/juce_dsp.h>
 #include "VocalFx.h"
 #include "Project.h"
+#include "AudioInput.h"
+#include "MixTools.h"
 
 struct DenoiseState;
 
 namespace tf
 {
 //==============================================================================
-/** RNNoise wrapper: 48 kHz mono, 480-sample frames, fixed 480-sample latency, dry/wet mix. */
+/** RNNoise wrapper for the live microphone: 48 kHz mono, 480-sample frames, dry/wet mix.
+    RNNoise itself answers one frame late, so the dry signal is delayed by the same 960 samples —
+    otherwise mixing the two would comb-filter the voice (a hollow, harsh sound). */
 class NoiseSuppressor
 {
 public:
-    static constexpr int frameSize = 480;
+    static constexpr int frameSize = 480, latency = 2 * frameSize;
     NoiseSuppressor();
     ~NoiseSuppressor();
     void reset();
     void process (float* data, int numSamples, float amount) noexcept;
 private:
     DenoiseState* state = nullptr;
-    float inFrame[frameSize] {}, dryFrame[frameSize] {}, outFrame[frameSize] {}, scaled[frameSize] {};
+    float inFrame[frameSize] {}, prevIn[frameSize] {}, dryFrame[frameSize] {}, outFrame[frameSize] {}, scaled[frameSize] {};
     int pos = 0;
     JUCE_DECLARE_NON_COPYABLE (NoiseSuppressor)
 };
@@ -85,14 +89,21 @@ private:
 };
 
 //==============================================================================
+struct ExportOptions
+{
+    double fadeIn = 0.0, fadeOut = 0.0;   // seconds
+    bool normalise = false;               // -14 LUFS (YouTube / Facebook loudness)
+};
+
+//==============================================================================
 /** A finished recording ("take"), stored in its own folder with session.xml. */
 struct Take
 {
-    juce::File folder, vocal, raw, backing;
+    juce::File folder, vocal, speaker, backing;
     double startSeconds = 0.0;      // song position where recording started
     double sampleRate = 48000.0;
     juce::int64 vocalOffset = 0;    // samples to skip at the start of vocal.wav (latency compensation)
-    juce::int64 rawOffset = 0;
+    juce::Time startedAt;           // wall-clock time of the first recorded sample (camera sync)
     double lengthSeconds = 0.0;
 
     bool isValid() const { return vocal.existsAsFile(); }
@@ -111,7 +122,8 @@ public:
     AudioEngine();
     ~AudioEngine() override;
 
-    void initialise (const juce::XmlElement* savedDeviceState);
+    /** micName: the microphone to use (may be on another sound card than the speaker). */
+    void initialise (const juce::XmlElement* savedDeviceState, const juce::String& micName = {});
     std::unique_ptr<juce::XmlElement> createDeviceState() const { return deviceManager.createStateXml(); }
     juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
     juce::AudioFormatManager& getFormatManager() noexcept { return formatManager; }
@@ -133,7 +145,7 @@ public:
     juce::String getArmedTrack() const;
     int getSongKey() const noexcept { return songKey.load(); }
     /** Auto-tune scale for every voice: -2 = follow the song (smart match), -1 = all notes, 0..23 = fixed key. */
-    void setScaleMode (int m) noexcept   { scaleMode.store (m); }
+    void setScaleMode (int m)            { if (scaleMode.exchange (m) != m) retuneAll(); }
     int getScaleMode() const noexcept    { return scaleMode.load(); }
     int getEffectiveKey() const noexcept { const int m = scaleMode.load(); return m == -2 ? songKey.load() : m; }
     void setLiveTune (bool b) noexcept   { liveTuneAll.store (b); }
@@ -163,13 +175,44 @@ public:
     bool punchFinished() const noexcept { return punchDone.load(); }
     double getRecordedSeconds() const noexcept;
     juce::String getRecordingTrack() const { return recordTrackId; }
-    struct RecordingResult { juce::String trackId; juce::File wav; double start = 0, in = 0, out = 0; bool ok = false, punch = false; };
+    struct RecordingResult
+    {
+        juce::String trackId;
+        juce::File wav, speaker;          // speaker: what the speakers played meanwhile (same timing as wav)
+        juce::Time startedAt;             // wall-clock time of the first sample (camera sync)
+        double start = 0, in = 0, out = 0;
+        bool ok = false, punch = false;
+    };
     RecordingResult takeLastRecording() { auto r = lastResult; lastResult = {}; return r; }
     const PeakTimeline& getLivePeaks() const noexcept { return vocalPeaks; }
 
     // ---- export (background thread). range empty = everything. progress 0..1, done(ok, message) on the message thread.
     void exportMix (const ProjectState& p, const juce::File& dest, juce::Range<double> range,
-                    std::function<void (float)> progress, std::function<void (bool, juce::String)> done);
+                    std::function<void (float)> progress, std::function<void (bool, juce::String)> done,
+                    ExportOptions options = {});
+    /** Renders the project offline exactly as it plays (effects, smart mix, master). Background thread. */
+    static bool renderProject (const ProjectState& p, juce::Range<double> range, double sampleRate, int scaleKey,
+                               juce::AudioBuffer<float>& out, int& numSamples, std::function<void (float)> progress, juce::String& error,
+                               const std::atomic<bool>* cancel = nullptr);
+    /** "Smart mix" balance: the voice volume that sits the voice just above the music (like released songs).
+        Returns trackId -> gain. Background thread. */
+    static std::map<juce::String, float> computeBalance (const ProjectState& p, int scaleKey);
+
+    // ---- the microphone (its own sound card is fine: no crackle from clock drift)
+    void setMicrophone (const juce::String& name);
+    juce::String getMicrophone() const { return micName; }
+    juce::StringArray getMicrophoneNames();
+    bool isMicSeparate() const noexcept { return splitInput.load(); }
+    InputBridge& getInputBridge() noexcept { return micBridge; }
+    /** Pitch the microphone hears right now (Hz, 0 = no clear note). */
+    float getLivePitchHz() const noexcept { return livePitch.hz(); }
+
+    // ---- count-in beeps and automatic sync measurement
+    void playBeep (float hz, double seconds, float level = 0.25f);
+    /** Plays a few clicks through the speaker, listens with the mic and sets the recording sync.
+        done(ok, total delay in ms, message) on the message thread. */
+    void measureLatency (std::function<void (bool, double, juce::String)> done);
+    bool isMeasuringLatency() const noexcept { return measuring.load(); }
     bool isExporting() const noexcept { return exporting.load(); }
 
     // ---- live input
@@ -183,7 +226,7 @@ public:
     void setUserOffsetMs (float ms)       { userOffsetMs.store (ms); }
     float getUserOffsetMs() const         { return userOffsetMs.load(); }
     void setPrerollSeconds (double s)     { prerollSec.store (s); }
-    void playTestTone()                   { testTone.store ((int) (currentRate.load() * 0.6)); }
+    void playTestTone()                   { playBeep (880.0f, 0.6, 0.2f); }
 
     // ---- status / meters
     float popInputPeak() noexcept  { return inPeak.exchange (0.0f); }
@@ -207,6 +250,9 @@ private:
 
     void waitUntilBuffered();
     void processChunk (const float* const* in, int numIn, float* const* out, int numOut, int start, int n) noexcept;
+    void updateInputRouting();
+    /** The scale changed: the corrected voices are computed again from the playhead. */
+    void retuneAll();
     std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> makeWriter (const juce::File& f, juce::String& error);
 
     //==============================================================================
@@ -222,9 +268,10 @@ private:
         void read (juce::AudioBuffer<float>& dest, int n, juce::int64 timelineAfter, double deviceRate) noexcept;
         bool waitReady (int timeoutMs);
     };
-    std::unique_ptr<TimelineTrack> makeTrack (std::unique_ptr<juce::PositionableAudioSource> src, double rate, int channels);
+    std::unique_ptr<TimelineTrack> makeTrack (std::unique_ptr<juce::PositionableAudioSource> src, double rate, int channels, bool prefill = true);
 
     class ClipSource;
+    class TunedClipSource;
     struct EngClip
     {
         juce::String key;                 // file + positions: unchanged clips are reused
@@ -244,9 +291,10 @@ private:
         juce::AudioBuffer<float> clipBuf, sum, fxOut;
         juce::int64 chainLatency = 0;
         std::atomic<float> meter { 0.0f };
+        MusicDucker ducker;
     };
     std::unique_ptr<EngTrack> makeEngTrack (const TrackInfo& t, std::vector<std::unique_ptr<EngClip>>& reusable);
-    std::unique_ptr<EngClip> makeClip (const ClipInfo& c, TrackKind kind, juce::int64 chainLatency, juce::String& error);
+    std::unique_ptr<EngClip> makeClip (const ClipInfo& c, TrackKind kind, const FxParams* fx, juce::String& error);
     static juce::String clipKey (const ClipInfo& c, juce::int64 chainLatency);
     void prepareTrack (EngTrack& t, double sr, int block);
 
@@ -266,7 +314,7 @@ private:
 
     // recording
     juce::CriticalSection writerLock;
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> vocalWriter, rawWriter;
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> vocalWriter, speakerWriter;
     std::atomic<bool> recording { false }, punchDone { false };
     bool recordWithNoise = false;
     std::atomic<double> recordStartSeconds { 0.0 };
@@ -279,14 +327,30 @@ private:
     RecordingResult lastResult;
 
     // processing state (audio thread)
-    juce::AudioBuffer<float> micBuf, nsBuf, master, monitorBuf;
+    juce::AudioBuffer<float> micBuf, nsBuf, master, monitorBuf, playBus, voiceBus, bridgeBuf, speakerBuf;
+    MasterBus masterBus;
+    LivePitch livePitch;
+    InputBridge micBridge;
+    juce::String micName;
+    std::atomic<bool> splitInput { false };
+    juce::String routedKey;
+    std::atomic<float> smartMixAmt { 1.0f };
+    std::atomic<bool> glueOn { true };
+    std::atomic<int> beepLeft { 0 };
+    std::atomic<float> beepHz { 880.0f }, beepLevel { 0.2f };
+    int beepTotal = 1;
+    // latency measurement
+    std::atomic<bool> measuring { false };
+    std::vector<float> measMic, measOut;
+    std::atomic<int> measPos { 0 };
+    std::function<void (bool, double, juce::String)> measureDone;
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>> (true);
     int maxBlock = 0;
     std::atomic<int> maxBlockShared { 0 };
     juce::dsp::IIR::Filter<float> highPass;
     SafetyLimiter limiter;
     NoiseSuppressor denoiser;
     juce::SmoothedValue<float> gainSm, voiceSm, monitorSm;
-    std::atomic<int> testTone { 0 };
     double tonePhase = 0.0;
 
     std::atomic<float> inputGainDb { 0.0f }, voiceVol { 0.8f }, noiseAmount { 0.8f }, userOffsetMs { 0.0f };

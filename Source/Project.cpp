@@ -1,6 +1,7 @@
 #include "Project.h"
 #include "Media.h"
 #include "VocalFx.h"
+#include "Theme.h"
 
 namespace tf
 {
@@ -52,6 +53,8 @@ juce::String projectToXml (const ProjectState& s)
     x.setAttribute ("version", 2);
     x.setAttribute ("name", s.name);
     x.setAttribute ("nextId", s.nextId);
+    x.setAttribute ("smartMix", s.smartMix);
+    x.setAttribute ("glue", s.glue);
     for (auto& t : s.tracks)
     {
         auto* e = x.createNewChildElement ("Track");
@@ -67,15 +70,21 @@ juce::String projectToXml (const ProjectState& s)
         e->setAttribute ("source", fileStr (t.source));
         e->setAttribute ("baseAudio", fileStr (t.baseAudio));
         e->setAttribute ("speed", t.speed);
-        for (auto& c : t.clips)
+        e->setAttribute ("semitones", t.semitones);
+        auto writeClip = [] (juce::XmlElement* ce, const ClipInfo& c)
         {
-            auto* ce = e->createNewChildElement ("Clip");
             ce->setAttribute ("id", c.id);
             ce->setAttribute ("file", fileStr (c.file));
             ce->setAttribute ("start", c.start);
             ce->setAttribute ("in", c.in);
             ce->setAttribute ("out", c.out);
-        }
+            if (c.speaker != juce::File()) ce->setAttribute ("speaker", fileStr (c.speaker));
+            if (c.camera != juce::File()) { ce->setAttribute ("camera", fileStr (c.camera)); ce->setAttribute ("cameraStart", c.cameraStart); }
+            if (c.label.isNotEmpty()) ce->setAttribute ("label", c.label);
+            if (c.recordedAt > 0) ce->setAttribute ("recordedAt", c.recordedAt);
+        };
+        for (auto& c : t.clips) writeClip (e->createNewChildElement ("Clip"), c);
+        for (auto& c : t.takes) writeClip (e->createNewChildElement ("Take"), c);
     }
     return x.toString();
 }
@@ -87,6 +96,8 @@ bool projectFromXml (const juce::String& text, ProjectState& s)
     ProjectState r;
     r.name = x->getStringAttribute ("name");
     r.nextId = x->getIntAttribute ("nextId", 1);
+    r.smartMix = (float) juce::jlimit (0.0, 1.0, x->getDoubleAttribute ("smartMix", 1.0));
+    r.glue = x->getBoolAttribute ("glue", true);
     for (auto* e : x->getChildWithTagNameIterator ("Track"))
     {
         TrackInfo t;
@@ -102,16 +113,26 @@ bool projectFromXml (const juce::String& text, ProjectState& s)
         t.source = strFile (e->getStringAttribute ("source"));
         t.baseAudio = strFile (e->getStringAttribute ("baseAudio"));
         t.speed = juce::jlimit (0.5, 1.5, e->getDoubleAttribute ("speed", 1.0));
-        for (auto* ce : e->getChildWithTagNameIterator ("Clip"))
+        t.semitones = juce::jlimit (-12, 12, e->getIntAttribute ("semitones", 0));
+        auto readClip = [] (const juce::XmlElement* ce)
         {
             ClipInfo c;
             c.id = ce->getStringAttribute ("id");
             c.file = strFile (ce->getStringAttribute ("file"));
-            c.start = ce->getDoubleAttribute ("start");
-            c.in = ce->getDoubleAttribute ("in");
+            c.start = juce::jmax (0.0, ce->getDoubleAttribute ("start"));
+            c.in = juce::jmax (0.0, ce->getDoubleAttribute ("in"));
             c.out = ce->getDoubleAttribute ("out");
-            if (c.file.existsAsFile() && c.length() > 0.0) t.clips.add (c);
-        }
+            c.speaker = strFile (ce->getStringAttribute ("speaker"));
+            c.camera = strFile (ce->getStringAttribute ("camera"));
+            c.cameraStart = ce->getDoubleAttribute ("cameraStart");
+            c.label = ce->getStringAttribute ("label");
+            c.recordedAt = ce->getDoubleAttribute ("recordedAt");
+            return c;
+        };
+        for (auto* ce : e->getChildWithTagNameIterator ("Clip"))
+            if (auto c = readClip (ce); c.file.existsAsFile() && c.length() > 0.0) t.clips.add (c);
+        for (auto* ce : e->getChildWithTagNameIterator ("Take"))
+            if (auto c = readClip (ce); c.file.existsAsFile() && c.length() > 0.0) t.takes.add (c);
         r.tracks.add (t);
     }
     s = r;
@@ -219,6 +240,7 @@ juce::String Project::addMusic (const juce::File& source, const juce::File& audi
     t.source = source;
     t.baseAudio = audio;
     t.speed = 1.0;
+    t.semitones = 0;
     t.clips.clear();
     ClipInfo c;
     c.id = newId ("c"); c.file = audio; c.start = 0.0; c.in = 0.0; c.out = dur;
@@ -291,7 +313,8 @@ void Project::removeRangeFromClips (juce::Array<ClipInfo>& clips, juce::Range<do
     clips = out;
 }
 
-void Project::insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade)
+void Project::insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade,
+                               const juce::File& speakerRef, const juce::File& camera, double cameraStart)
 {
     const int i = st.indexOf (trackId);
     if (i < 0 || out - in <= 0.01) return;
@@ -303,7 +326,140 @@ void Project::insertRecording (const juce::String& trackId, const juce::File& wa
     removeRangeFromClips (t.clips, { start + h, end - h }, st);
     ClipInfo c;
     c.id = newId ("c"); c.file = wav; c.start = start - h; c.in = in - h; c.out = out + h;
+    c.speaker = speakerRef; c.camera = camera; c.cameraStart = cameraStart;
     t.clips.add (c);
+    // keep every recording as a take, so a better earlier one can be picked later
+    auto take = c;
+    take.id = newId ("k");
+    take.recordedAt = (double) juce::Time::currentTimeMillis();
+    take.label = juce::String::fromUTF8 ("টেক ") + bn (t.takes.size() + 1);
+    t.takes.add (take);
+    st.tracks.set (i, t);
+    changed();
+}
+
+bool Project::splitAt (const juce::String& trackId, double tl)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0) return false;
+    auto t = st.tracks.getReference (i);
+    for (int k = 0; k < t.clips.size(); ++k)
+    {
+        auto c = t.clips.getReference (k);
+        if (tl <= c.start + 0.02 || tl >= c.end() - 0.02) continue;
+        pushUndo();
+        auto a = c, b = c;
+        a.out = c.in + (tl - c.start);
+        b.id = newId ("c");
+        b.in = a.out;
+        b.start = tl;
+        t.clips.set (k, a);
+        t.clips.insert (k + 1, b);
+        st.tracks.set (i, t);
+        changed();
+        return true;
+    }
+    return false;
+}
+
+void Project::deleteClip (const juce::String& trackId, const juce::String& clipId)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0) return;
+    auto t = st.tracks.getReference (i);
+    for (int k = 0; k < t.clips.size(); ++k)
+        if (t.clips.getReference (k).id == clipId)
+        {
+            pushUndo();
+            t.clips.remove (k);
+            st.tracks.set (i, t);
+            changed();
+            return;
+        }
+}
+
+void Project::trimClip (const juce::String& trackId, const juce::String& clipId, bool fromLeft, double tl)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0) return;
+    auto t = st.tracks.getReference (i);
+    for (int k = 0; k < t.clips.size(); ++k)
+    {
+        auto c = t.clips.getReference (k);
+        if (c.id != clipId) continue;
+        if (fromLeft)
+        {
+            // the left edge can go back only as far as the file has audio (in >= 0)
+            const double nt = juce::jlimit (c.start - c.in, c.end() - 0.05, tl);
+            c.in += nt - c.start;
+            c.start = nt;
+        }
+        else
+        {
+            double fileLen = c.out;
+            juce::AudioFormatManager fm; fm.registerBasicFormats();
+            if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (c.file) }) fileLen = (double) r->lengthInSamples / r->sampleRate;
+            const double ne = juce::jlimit (c.start + 0.05, c.start + (fileLen - c.in), tl);
+            c.out = c.in + (ne - c.start);
+        }
+        pushUndo();
+        t.clips.remove (k);
+        removeRangeFromClips (t.clips, { c.start, c.end() }, st);
+        t.clips.add (c);
+        st.tracks.set (i, t);
+        changed();
+        return;
+    }
+}
+
+void Project::useTake (const juce::String& trackId, const juce::String& clipId, const ClipInfo& take)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0) return;
+    const auto& tr = st.tracks.getReference (i);
+    const ClipInfo* cur = nullptr;
+    for (auto& c : tr.clips) if (c.id == clipId) cur = &c;
+    if (cur == nullptr) return;
+    // the part of the take that covers this clip's time
+    const double a = juce::jmax (cur->start, take.start), b = juce::jmin (cur->end(), take.end());
+    if (b - a < 0.05) return;
+    const double in = take.in + (a - take.start);
+    auto keepTakes = tr.takes;
+    // cross-fade into the neighbours when the take file has audio around this part
+    insertRecording (trackId, take.file, a, in, in + (b - a), in >= clipFadeSeconds, take.speaker, take.camera, take.cameraStart);
+    // choosing a take must not add a new take
+    const int j = st.indexOf (trackId);
+    if (j >= 0) { auto t = st.tracks.getReference (j); t.takes = keepTakes; st.tracks.set (j, t); changed(); }
+}
+
+void Project::replaceClipFiles (const juce::String& trackId, const std::map<juce::String, juce::File>& m)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0 || m.empty()) return;
+    pushUndo();
+    auto t = st.tracks.getReference (i);
+    for (auto& c : t.clips)
+        if (auto it = m.find (c.file.getFullPathName()); it != m.end()) c.file = it->second;
+    st.tracks.set (i, t);
+    changed();
+}
+
+void Project::setMix (float smartMix, bool glue)
+{
+    pushUndo();
+    st.smartMix = juce::jlimit (0.0f, 1.0f, smartMix);
+    st.glue = glue;
+    changed();
+}
+
+void Project::setMusicKey (const juce::String& trackId, const juce::File& newAudio, int semis)
+{
+    const int i = st.indexOf (trackId);
+    if (i < 0) return;
+    pushUndo();
+    auto t = st.tracks.getReference (i);
+    for (auto& c : t.clips) c.file = newAudio;
+    t.semitones = semis;
     st.tracks.set (i, t);
     changed();
 }

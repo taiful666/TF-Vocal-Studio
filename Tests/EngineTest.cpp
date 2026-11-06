@@ -19,6 +19,8 @@ static int failures = 0;
 #define CHECK(cond, msg) do { if (cond) std::cout << "  PASS  " << msg << "\n"; else { std::cout << "  FAIL  " << msg << "\n"; ++failures; } } while (0)
 
 #include "FakeDevice.h"
+#define TFCHECK(cond, msg) do { if (cond) std::cout << "  PASS  " << msg << "\n"; else { std::cout << "  FAIL  " << msg << "\n"; ++failures; } } while (0)
+#include "QualityTests.h"
 
 //==============================================================================
 static void pump (int ms) { juce::MessageManager::getInstance()->runDispatchLoopUntil (ms); }
@@ -366,7 +368,7 @@ static void testEffects()
         builtInPresets()[11].applyTo (p);   // band rock
         p.setOn (FxParams::dblOn, true);
         VocalChain ch (p);
-        ch.prepare (sr, 512, true);
+        ch.prepare (sr, 512, false);   // as used for playback: the pitch correction runs ahead of time on another thread
         const int N = 48000 * 10;
         std::vector<float> in ((size_t) N), L ((size_t) N), R ((size_t) N);
         juce::Random rnd (3);
@@ -384,8 +386,18 @@ static void testEffects()
         for (int i = 0; i < N; ++i) { finite &= std::isfinite (L[(size_t) i]) && std::isfinite (R[(size_t) i]); peak = juce::jmax (peak, std::abs (L[(size_t) i]), std::abs (R[(size_t) i])); }
         CHECK (finite, "chain output is finite (no NaN/inf)");
         CHECK (peak > 0.1f && peak < 2.0f, "chain level sensible (peak " + juce::String (peak, 2) + ")");
-        std::cout << "        full chain CPU: " << juce::String (100.0 * ms / 10000.0, 2) << "% of one core\n";
-        CHECK (ms < 1500.0, "full effects chain runs far faster than real time");
+        std::cout << "        full chain CPU (audio thread): " << juce::String (100.0 * ms / 10000.0, 2) << "% of one core\n";
+        CHECK (ms < 1000.0, "full effects chain runs far faster than real time");
+        // the studio pitch correction (background thread) must also keep well ahead of real time
+        {
+            SmoothTune st; st.prepare (sr, 1024);
+            std::vector<float> o2 ((size_t) N);
+            const auto t1 = juce::Time::getMillisecondCounterHiRes();
+            for (int i = 0; i < N; i += 1024) st.process (in.data() + i, o2.data() + i, juce::jmin (1024, N - i), true, 0.6f, 50.0f, -1);
+            const auto ms2 = juce::Time::getMillisecondCounterHiRes() - t1;
+            std::cout << "        pitch correction CPU (read-ahead thread): " << juce::String (100.0 * ms2 / 10000.0, 2) << "% of one core\n";
+            CHECK (ms2 < 5000.0 && st.getUnderruns() == 0, "pitch correction keeps ahead of real time, no gaps");
+        }
         // stereo spread from doubler/echo/reverb
         double diff = 0; for (int i = 0; i < N; ++i) diff += std::abs (L[(size_t) i] - R[(size_t) i]);
         CHECK (diff > 1.0, "effects produce a stereo image");
@@ -528,7 +540,7 @@ static void testEachEffect()
         {
             FxParams p; allOff (p); p.setOn (FxParams::revOn, on); p.set (FxParams::rev, 80.0f); p.set (FxParams::room, room);
             auto o = runChain (p, in);
-            return energyDb (o.L, from, to);
+            return energyDb (o.L, from + (size_t) o.lat, juce::jmin (o.L.size(), to + (size_t) o.lat));
         };
         const double off = tail (false, 50, 9600, 48000), on = tail (true, 50, 9600, 48000);
         CHECK (on > off + 40.0 && on > -60.0, "'রিভার্ব' leaves a hall tail (" + juce::String (on, 0) + " dB vs off " + juce::String (off, 0) + " dB)");
@@ -754,6 +766,14 @@ int main()
     testEffects();
     testEveryEffect();
     testEachEffect();
+    quality::testVoiceQuality (failures);
+    quality::testMixTools (failures);
+    quality::testInputBridge (failures);
+    if (juce::SystemStats::getEnvironmentVariable ("TF_QUICK", {}).isNotEmpty())
+    {
+        std::cout << (failures == 0 ? "\nQUICK: ALL PASSED\n" : "\nQUICK: FAILURES\n");
+        return failures == 0 ? 0 : 1;
+    }
 
     std::cout << "\nAI noise removal (offline)\n";
     {
@@ -810,7 +830,7 @@ int main()
     std::cout << "\nDevice\n";
     CHECK (engine.isDeviceOpen(), "simulated device open");
     CHECK (engine.noiseAvailable(), "48 kHz -> AI noise removal available");
-    CHECK (engine.getRoundTripLatencySamples() == FakeDevice::loopDelay, "round-trip latency read from device");
+    CHECK (engine.getRoundTripLatencySamples() == FakeDevice::loopDelay + MasterBus::lookahead, "round-trip latency read from device (+ master look-ahead)");
 
     auto* dev = dynamic_cast<FakeDevice*> (engine.getDeviceManager().getCurrentAudioDevice());
     dev->positionProbe = [&engine] { return engine.getPosition(); };
@@ -821,6 +841,8 @@ int main()
     std::cout << "\nProject\n";
     Project project;
     project.newProject ("engine test");
+    CHECK (project.state().smartMix > 0.99f && project.state().glue, "new projects start with the smart mix and master glue on");
+    project.setMix (0.0f, false);   // the mixing-arithmetic checks below need the plain sum
     const auto musicId = project.addMusic (song, song, 20.0);
     juce::String voiceId;
     for (auto& t : project.state().tracks) if (t.kind == TrackKind::vocal) voiceId = t.id;
@@ -861,7 +883,7 @@ int main()
     auto rec1 = finishRecording();
     CHECK (rec1.ok && rec1.trackId == voiceId, "recording result for the voice track");
     CHECK (std::abs (rec1.start - 2.0) < 0.01, "clip starts where recording started (" + juce::String (rec1.start, 3) + " s)");
-    CHECK (std::abs (rec1.in * 48000.0 - FakeDevice::loopDelay) < 0.5, "latency head skipped (" + juce::String (rec1.in * 48000.0, 1) + " samples)");
+    CHECK (std::abs (rec1.in * 48000.0 - (FakeDevice::loopDelay + MasterBus::lookahead)) < 0.5, "latency head skipped (" + juce::String (rec1.in * 48000.0, 1) + " samples)");
     CHECK (std::abs ((rec1.out - rec1.in) - 4.0) < 0.3, "clip length ~4 s");
     {
         auto vocal = readMono (rec1.wav, (juce::int64) std::llround (rec1.in * 48000), 48000 * 2);
@@ -888,7 +910,10 @@ int main()
         dev->capture = false;
         engine.pause();
         pump (100);
-        return { dev->captured, dev->captureStartPos };
+        // what the speaker plays is delayed by the master limiter's look-ahead (a fixed, compensated delay)
+        auto c = dev->captured;
+        c.erase (c.begin(), c.begin() + (long) juce::jmin ((size_t) MasterBus::lookahead, c.size()));
+        return { c, dev->captureStartPos };
     };
     {
         // voice alone (music muted)
@@ -969,6 +994,7 @@ int main()
         writeTone (newTake, 0.0);   // the singer holds the same note in the new take
         Project pj;
         pj.newProject ("join test");
+        pj.setMix (0.0f, false);
         juce::String vid;
         for (auto& t : pj.state().tracks) vid = t.id;
         { auto t = pj.state().tracks.getReference (0); FxParams n; allOff (n); t.fx = n.toString(); pj.setTrack (t, false); }
@@ -1052,18 +1078,22 @@ int main()
         dev->extraNoise = 0.0f;
         auto r = engine.takeLastRecording();
         CHECK (r.ok && std::abs (r.start) < 1e-6, "free recording placed at 0 s");
-        CHECK (std::abs (r.in * 48000.0 - (FakeDevice::loopDelay + NoiseSuppressor::frameSize)) < 0.5, "noise removal delay compensated");
-        auto take = Take::load (r.wav.getParentDirectory());
-        auto v = readMono (r.wav, (juce::int64) std::llround (r.in * 48000) + 48000);
-        auto raw = readMono (r.wav.getSiblingFile ("vocal_raw.wav"), take.rawOffset + 48000);
-        auto db = juce::Decibels::gainToDecibels ((float) (rms (v) / juce::jmax (1e-9, rms (raw))));
-        CHECK (db < -3.0f, "noise removal applied to the recording: " + juce::String (-db, 1) + " dB less noise");
+        CHECK (std::abs (r.in * 48000.0 - (FakeDevice::loopDelay + MasterBus::lookahead)) < 0.5, "latency compensated (the recording itself is never processed)");
+        // one-click noise removal works on the recording afterwards (offline, Audacity-style)
+        {
+            auto cleaned = r.wav.getSiblingFile ("vocal_clean.wav");
+            std::atomic<bool> nc { false };
+            auto e2 = mixtools::reduceNoise (r.wav, cleaned, 12.0f, nullptr, nc);
+            auto v = readMono (cleaned, 48000);
+            auto raw = readMono (r.wav, 48000);
+            auto db = juce::Decibels::gainToDecibels ((float) (rms (v) / juce::jmax (1e-9, rms (raw))));
+            CHECK (e2.isEmpty() && db < -8.0f, "noise removal on the recording: " + juce::String (-db, 1) + " dB less noise");
+        }
         engine.setNoiseEnabled (false);
 
         // sung without music: it plays back, with effects, and a cut part is silent
-        // (the hiss itself is the "voice" here, so use the untreated copy)
-        const double rawIn = (double) take.rawOffset / 48000.0;
-        free.insertRecording (r.trackId, r.wav.getSiblingFile ("vocal_raw.wav"), r.start, rawIn, rawIn + (r.out - r.in));
+        // (the hiss itself is the "voice" here)
+        free.insertRecording (r.trackId, r.wav, r.start, r.in, r.out);
         dev->extraNoise = 0.0f;
         auto v2 = free.state().tracks.getReference (0);
         { FxParams fp; for (auto& pr : builtInPresets()) if (pr.id == "ghazal") pr.applyTo (fp); v2.fx = fp.toString(); }

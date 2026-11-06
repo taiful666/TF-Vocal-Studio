@@ -11,8 +11,8 @@ namespace tf
 /** All vocal-effect settings, shared (lock-free) between UI, live monitor and playback/export. */
 struct FxParams
 {
-    enum Param { tuneAmt, tuneSpd, bass, mid, bright, body, warm, rev, room, echo, etime, dbl, deess, numParams };
-    enum Switch { tuneOn, toneOn, bodyOn, revOn, echoOn, dblOn, deessOn, numSwitches };
+    enum Param { tuneAmt, tuneSpd, bass, mid, bright, body, warm, rev, room, echo, etime, dbl, deess, level, numParams };
+    enum Switch { tuneOn, toneOn, bodyOn, revOn, echoOn, dblOn, deessOn, levelOn, numSwitches };
 
     std::array<std::atomic<float>, numParams> p;   // 0..100
     std::array<std::atomic<bool>, numSwitches> on;
@@ -52,6 +52,37 @@ private:
 };
 
 //==============================================================================
+/** Pitch of a voice frame (YIN with FFT autocorrelation). Shared by the auto-tune and the live pitch display. */
+class PitchDetector
+{
+public:
+    static constexpr int frameLen = 2048;
+    void prepare (double sampleRate);
+    /** frame: the last frameLen samples. Returns the period in samples, or 0 if unvoiced. */
+    float analyse (const float* frame) noexcept;
+private:
+    static constexpr int fftOrder = 12, fftSize = 1 << fftOrder;
+    double sr = 48000.0;
+    std::unique_ptr<juce::dsp::FFT> fft;
+    std::vector<float> fa, fb, dfun;
+};
+
+/** Live pitch of the microphone for the on-screen tuner (runs on the audio thread, cheap). */
+class LivePitch
+{
+public:
+    void prepare (double sampleRate);
+    void push (const float* x, int n) noexcept;
+    float hz() const noexcept { return hzNow.load (std::memory_order_relaxed); }
+private:
+    PitchDetector det;
+    std::vector<float> ring, frame;
+    int w = 0, since = 0, hop = 1024;
+    std::atomic<float> hzNow { 0.0f };
+    double sr = 48000.0;
+};
+
+//==============================================================================
 /** Real-time pitch correction: FFT-based YIN detection + TD-PSOLA resynthesis (formant-preserving).
     Fixed latency of latencySamples(). With amount 0 it reproduces the input exactly (delayed). */
 class AutoTune
@@ -71,14 +102,14 @@ private:
 
     double sr = 48000.0;
     static constexpr int ringSize = 1 << 14, ringMask = ringSize - 1;
-    static constexpr int frameLen = 2048, fftOrder = 12, fftSize = 1 << fftOrder;   // 4096
+    static constexpr int frameLen = PitchDetector::frameLen;
     std::vector<float> inRing, outAcc, winAcc;
     juce::int64 now = 0;               // samples written so far (input timeline)
     int latency = 2048;
 
     // detection
-    std::unique_ptr<juce::dsp::FFT> fft;
-    std::vector<float> fa, fb, frame, dfun;
+    PitchDetector detector;
+    std::vector<float> frame;
     int hop = 256, sinceDetect = 0;
     float periodSamples = 0.0f;        // 0 = unvoiced
     float detectedHz = 0.0f;
@@ -95,42 +126,54 @@ private:
 };
 
 //==============================================================================
-/** Dattorro plate reverb (stereo out, mono in). */
-class PlateReverb
+/** Studio-quality pitch correction for playback and export: the same note decisions as AutoTune,
+    but the voice is re-pitched by Rubber Band (R3, formants kept), which stays smooth and natural.
+    Fixed latency. When off (or nothing to correct) the voice passes through untouched. */
+class SmoothTune
+{
+public:
+    SmoothTune();
+    ~SmoothTune();
+    void prepare (double sampleRate, int maxBlock);
+    void reset();
+    /** amount 0..1, speed 0..100, scaleKey as in FxParams. enabled=false: delayed dry voice. */
+    void process (const float* in, float* out, int n, bool enabled, float amount, float speed, int scaleKey) noexcept;
+    int latencySamples() const noexcept { return latency; }
+    float currentShift() const noexcept { return shiftSemis; }
+    int getUnderruns() const noexcept { return underruns; }
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+    double sr = 48000.0;
+    int latency = 0, underruns = 0;
+    float shiftSemis = 0.0f;
+};
+
+//==============================================================================
+/** Smooth hall reverb: 8-line feedback delay network with slowly moving delays (no metallic ring),
+    pre-delay, dense input diffusion, and a filtered send (no boomy lows, no hissy highs). */
+class SmoothReverb
 {
 public:
     void prepare (double sampleRate);
     void reset();
-    void process (const float* in, float* outL, float* outR, int n, float decay, float damping, float wet) noexcept;
+    /** Adds the reverb of in to outL/outR. rt60 in seconds, damping 0..1 (high frequencies die sooner). */
+    void process (const float* in, float* outL, float* outR, int n, float rt60, float damping, float wet) noexcept;
 private:
-    struct Delay
-    {
-        std::vector<float> buf; int w = 0, mask = 0;
-        void init (int maxLen) { int s = 1; while (s < maxLen + 2) s <<= 1; buf.assign ((size_t) s, 0.0f); mask = s - 1; w = 0; }
-        inline void push (float x) noexcept { buf[(size_t) w] = x; w = (w + 1) & mask; }
-        inline float tap (int d) const noexcept { return buf[(size_t) ((w - 1 - d) & mask)]; }
-        inline float tapFrac (float d) const noexcept
-        {
-            const int i = (int) d; const float f = d - (float) i;
-            return tap (i) + f * (tap (i + 1) - tap (i));
-        }
-    };
-    float allpass (Delay& d, int len, float g, float x) noexcept
-    {
-        const float v = d.tap (len - 1);
-        const float u = x + g * v;
-        d.push (u);
-        return v - g * u;
-    }
-    double sr = 48000.0, scale = 1.0;
-    Delay pre, ap1, ap2, ap3, ap4, mapA, dlA, ap5, dlA2, mapB, dlB, ap6, dlB2;
-    int lpre = 0, l1 = 0, l2 = 0, l3 = 0, l4 = 0, lmA = 0, ldA = 0, l5 = 0, ldA2 = 0, lmB = 0, ldB = 0, l6 = 0, ldB2 = 0;
-    float bwState = 0.0f, dampA = 0.0f, dampB = 0.0f, lfo = 0.0f, lfoInc = 0.0f;
-    int tapsL[7] {}, tapsR[7] {};
+    struct Line { std::vector<float> buf; int mask = 0, w = 0; float len = 0, g = 0, lp = 0; };
+    std::array<Line, 8> lines;
+    std::array<std::vector<float>, 4> diff; std::array<int, 4> diffLen {}, diffW {};
+    std::vector<float> pre; int preLen = 0, preW = 0, preMask = 0;
+    Biquad sendHp, sendLp;
+    double sr = 48000.0;
+    float lastRt = -1.0f, lastDamp = -1.0f, dampCoef = 0.3f;
+    float ph1 = 0.0f, ph2 = 0.0f, inc1 = 0.0f, inc2 = 0.0f, modDepth = 0.0f;
 };
 
 //==============================================================================
-/** The complete vocal chain: auto-tune -> de-esser -> EQ -> compressor/warmth -> double voice, echo, reverb.
+/** The complete vocal chain:
+      (auto-tune) -> clean-up filter -> auto level (vocal rider) -> EQ -> compressor -> de-esser -> warmth
+      -> double voice, echo, reverb.
     Mono in, stereo out. Used for the live monitor, playing back a take, and export (offline). */
 class VocalChain
 {
@@ -141,22 +184,25 @@ public:
     void reset();
     void process (const float* in, float* outL, float* outR, int n, bool isLiveMonitor) noexcept;
     int latencySamples (bool isLiveMonitor) const noexcept;
+    /** Gain the vocal rider applies right now (dB), for the tests and the meter. */
+    float riderGainDb() const noexcept { return juce::Decibels::gainToDecibels (riderGain); }
 
 private:
     void updateFilters() noexcept;
     const FxParams& params;
     double sr = 48000.0;
     bool tuneInPath = false;
-    AutoTune tune;
-    PlateReverb reverb;
-    Biquad deLp1, deLp2, deHp1, deHp2, low, midPk, high, warmLp;
-    float deessEnv = 0.0f, compEnv = 0.0f, makeup = 1.0f;
-    std::vector<float> work, delayLine, echoL, echoR, revL, revR, dblL, dblR, tuneOut;
+    AutoTune tune;          // live monitor (low latency)
+    SmoothTune smoothTune;  // playback and export (studio quality)
+    SmoothReverb reverb;
+    Biquad deLp1, deLp2, deHp1, deHp2, low, midPk, high, wLp1, wLp2, wHp1, wHp2;
+    float deessEnv = 0.0f, deessFull = 0.0f, compDet = 0.0f, compGain = 1.0f, riderDet = 0.0f, riderGain = 1.0f, dcX = 0.0f, dcY = 0.0f;
+    std::vector<float> work, delayLine, echoL, echoR, tuneOut, sendBuf;
     int dlMask = 0, dlW = 0, echoMask = 0, echoW = 0;
     float lfo1 = 0.0f, lfo2 = 0.0f;
     Biquad echoLpL, echoLpR, echoHpL, echoHpR;
     float lastBass = -1, lastMid = -1, lastBright = -1;
-    juce::SmoothedValue<float> wetRev, wetEcho, wetDbl, drive, bypassMix;
+    juce::SmoothedValue<float> wetRev, wetEcho, wetDbl, warmMix;
 };
 
 //==============================================================================

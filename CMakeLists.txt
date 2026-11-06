@@ -89,7 +89,9 @@ target_sources(TFVocalStudio PRIVATE
     Source/Timeline.cpp
     Source/Inspector.cpp
     Source/Settings.cpp
-    Source/VideoExport.cpp)
+    Source/VideoExport.cpp
+    Source/AudioInput.cpp
+    Source/MixTools.cpp)
 
 target_compile_definitions(TFVocalStudio PRIVATE
     JUCE_WEB_BROWSER=0
@@ -135,14 +137,14 @@ option(TF_BUILD_TESTS "Build the automated engine test" OFF)
 if(TF_BUILD_TESTS)
     juce_add_console_app(TFEngineTest PRODUCT_NAME "TFEngineTest")
     target_sources(TFEngineTest PRIVATE Tests/EngineTest.cpp Source/AudioEngine.cpp Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp Source/Project.cpp Source/Stretch.cpp
-        Source/Theme.cpp Source/VideoExport.cpp)
+        Source/Theme.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp)
     target_include_directories(TFEngineTest PRIVATE Source Tests third_party)
     if(MSVC)
         target_compile_options(TFEngineTest PRIVATE /utf-8 /MP)
     endif()
     target_compile_definitions(TFEngineTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_USE_MP3AUDIOFORMAT=1 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1)
-    target_link_libraries(TFEngineTest PRIVATE TFVSData rnnoise rubberband juce::juce_audio_utils juce::juce_dsp
+    target_link_libraries(TFEngineTest PRIVATE TFVSData rnnoise rubberband juce::juce_audio_utils juce::juce_audio_devices juce::juce_dsp
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
     # UI test: the real main window, buttons pressed by code, simulated sound card
@@ -150,7 +152,7 @@ if(TF_BUILD_TESTS)
     target_sources(TFUITest PRIVATE Tests/UITest.cpp
         Source/MainComponent.cpp Source/AudioEngine.cpp Source/Theme.cpp Source/StudioView.cpp Source/LibraryView.cpp
         Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp Source/Project.cpp Source/Stretch.cpp Source/Timeline.cpp
-        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp)
+        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp)
     target_include_directories(TFUITest PRIVATE Source Tests third_party)
     if(MSVC)
         target_compile_options(TFUITest PRIVATE /utf-8 /MP)

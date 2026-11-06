@@ -253,7 +253,7 @@ int UITest::run()
         const double v = rms (voiceOnly, 4800), b = rms (both, 4800), m = rms (musicOnly, 4800);
         std::cout << "        level: voice " << v << ", music " << m << ", together " << b << "\n";
         CHECK (v > 0.02, "the recorded voice is heard on playback (with effects)");
-        CHECK (b > m * 1.3 && b > v * 1.1, "voice and music play together");
+        CHECK (b > m * 1.3 && b > v * 1.03, "voice and music play together (music gives way a little: smart mix)");
         // play from somewhere else too
         auto later = capture (3.0, 800);
         CHECK (rms (later, 4800) > m * 0.5, "voice + music also when playing from another place");
