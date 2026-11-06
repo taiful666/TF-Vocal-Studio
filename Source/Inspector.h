@@ -134,8 +134,15 @@ private:
 
     // music jobs
     void applySpeed (double speed);
-    void runSeparation();
+    void applyKey (int semitones);
+    void renderMusic (double speed, int semitones, bool isSpeed);
     void cancelJob();
+public:
+    // recording clean-up and smart mix (also used by the right-click menu and the transport button)
+    enum class CleanKind { noise, bleed };
+    void cleanVoice (CleanKind, const juce::String& trackId = {});
+    void autoBalance();
+private:
 
     Project& project;
     AudioEngine& engine;

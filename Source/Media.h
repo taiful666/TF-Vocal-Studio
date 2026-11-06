@@ -67,15 +67,4 @@ private:
     juce::WaitableEvent spaceAvailable;
 };
 
-//==============================================================================
-/** AI music / voice separation (UVR MDX-Net model via sherpa-onnx, fully offline). */
-class Separator
-{
-public:
-    static bool isAvailable (juce::String* whyNot = nullptr);
-    struct Result { juce::File music, vocals; juce::String error; };
-    /** Blocking; run on a background thread. progress 0..1. */
-    static Result run (const juce::File& song, const juce::File& musicOut, const juce::File& vocalsOut,
-                       std::function<void (float, const juce::String&)> progress, std::atomic<bool>& cancel);
-};
 }

@@ -34,31 +34,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force deps, bundle\models | Out-Null
+          New-Item -ItemType Directory -Force deps, bundle | Out-Null
           & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o deps\ff.zip "https://github.com/GyanD/codexffmpeg/releases/download/8.0/ffmpeg-8.0-essentials_build.zip"
           if ($LASTEXITCODE -ne 0) { throw "Download failed" }
           $h = (Get-FileHash deps\ff.zip -Algorithm SHA256).Hash.ToLower()
           if ($h -ne "647e467caf82b9fa200a562769b5ff4d736aaf725804ed2c64ea9752106fa569") { throw "Checksum mismatch ($h)" }
-
-      - name: Download AI engine sherpa-onnx 2.0.1 (pinned, SHA-256 verified)
-        timeout-minutes: 8
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o deps\so.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x64-shared-MT-Release.tar.bz2"
-          if ($LASTEXITCODE -ne 0) { throw "Download failed" }
-          $h = (Get-FileHash deps\so.tar.bz2 -Algorithm SHA256).Hash.ToLower()
-          if ($h -ne "dc703575a68594435f53dec93df775ff4913af851a196c0537163f21d8d2364e") { throw "Checksum mismatch ($h)" }
-
-      - name: Download AI separation model (pinned, SHA-256 verified)
-        timeout-minutes: 8
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          & curl.exe -sSfL --retry 3 --connect-timeout 30 --max-time 400 -o bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR-MDX-NET-Inst_HQ_3.onnx"
-          if ($LASTEXITCODE -ne 0) { throw "Download failed" }
-          $h = (Get-FileHash bundle\models\UVR-MDX-NET-Inst_HQ_3.onnx -Algorithm SHA256).Hash.ToLower()
-          if ($h -ne "c207b845d51dc1303c543503f6f5a8b596da5d7de97bead77b3e16ec38e8d5b3") { throw "Checksum mismatch ($h)" }
 
       - name: Unpack bundled tools
         timeout-minutes: 5
@@ -67,16 +47,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           & 7z x -y -odeps\ff deps\ff.zip "ffmpeg-8.0-essentials_build/bin/ffmpeg.exe" "ffmpeg-8.0-essentials_build/LICENSE" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Unzip failed" }
-          & 7z x -y -odeps deps\so.tar.bz2 | Out-Null
-          & 7z x -y -odeps deps\so.tar "sherpa-onnx-v2.0.1-win-x64-shared-MT-Release/lib/*.dll" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Untar failed" }
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\bin\ffmpeg.exe bundle\
           Copy-Item deps\ff\ffmpeg-8.0-essentials_build\LICENSE bundle\FFMPEG-LICENSE.txt
-          $so = "deps\sherpa-onnx-v2.0.1-win-x64-shared-MT-Release\lib"
-          Copy-Item "$so\sherpa-onnx-c-api.dll", "$so\onnxruntime.dll", "$so\onnxruntime_providers_shared.dll" bundle\
           Get-ChildItem -Recurse bundle | Format-Table Name, Length
 
-      - name: Run engine test (sync, effects, auto-tune, video, AI separation, CPU load)
+      - name: Run engine test (sync, sound quality, effects, auto-tune, mic drift, clean-up, video, CPU load)
         timeout-minutes: 15
         shell: pwsh
         run: |

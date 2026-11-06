@@ -53,8 +53,6 @@ private:
     void addSongs (const juce::Array<juce::File>&);
     void chooseSongs();
     void showRowMenu (int row);
-    void separate (const juce::File& song);
-    void chooseForSeparation();
     void setTab (bool recordings);
     void renameItem (const Item& it);
     void deleteItem (const Item& it);
@@ -74,9 +72,7 @@ private:
     TFButton songsTab { juce::String::fromUTF8 ("গান"), TFButton::Style::segment },
              takesTab { juce::String::fromUTF8 ("আমার প্রজেক্ট"), TFButton::Style::segment },
              addBtn   { juce::String::fromUTF8 ("গান যোগ করুন"), TFButton::Style::accent },
-             folderBtn { juce::String::fromUTF8 ("গানের ফোল্ডার খুলুন") },
-             sepBtn { juce::String::fromUTF8 ("গান বাছুন"), TFButton::Style::accent },
-             sepCancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool };
+             folderBtn { juce::String::fromUTF8 ("গানের ফোল্ডার খুলুন") };
     juce::TextEditor search;
     juce::ListBox list { "songs", this };
     juce::Rectangle<int> tabWell, listCard, asideCard, headerRow, searchArea;
@@ -89,9 +85,6 @@ private:
 
     // AI separation / copying jobs
     juce::ThreadPool jobPool { juce::ThreadPoolOptions().withThreadName ("TF library jobs").withNumberOfThreads (1) };
-    std::atomic<bool> sepBusy { false }, sepCancelFlag { false };
-    float sepProgress = 0.0f;
-    juce::String sepStatus, sepName;
-    juce::Rectangle<int> sepBar;
+
 };
 }

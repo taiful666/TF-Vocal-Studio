@@ -225,7 +225,7 @@ private:
              viewVideo { juce::String::fromUTF8 ("ভিডিও"), TFButton::Style::segment },
              viewLyrics { juce::String::fromUTF8 ("লিরিক্স"), TFButton::Style::segment },
              lyricsBtn { juce::String::fromUTF8 ("লিরিক্স") },
-             noiseBtn { juce::String::fromUTF8 ("নয়েজ রিমুভ") };
+             noiseBtn { juce::String::fromUTF8 ("নয়েজ সরান") };
     juce::Rectangle<int> viewWell;
 
     // transport

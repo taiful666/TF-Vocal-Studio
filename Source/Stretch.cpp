@@ -4,17 +4,18 @@
 
 namespace tf
 {
-juce::File tempoCacheFor (const juce::File& audio, double speed)
+juce::File tempoCacheFor (const juce::File& audio, double speed, int semitones)
 {
     auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                    .getChildFile ("TF Vocal Studio").getChildFile ("TempoCache");
     dir.createDirectory();
-    auto key = audio.getFullPathName() + "|" + juce::String (audio.getSize()) + "|" + juce::String (speed, 3);
+    auto key = audio.getFullPathName() + "|" + juce::String (audio.getSize()) + "|" + juce::String (speed, 3) + "|" + juce::String (semitones);
     return dir.getChildFile (juce::File::createLegalFileName (audio.getFileNameWithoutExtension()).substring (0, 40)
-                             + "-x" + juce::String (speed, 2) + "-" + juce::String::toHexString (key.hashCode64()) + ".wav");
+                             + "-x" + juce::String (speed, 2) + (semitones != 0 ? "-k" + juce::String (semitones) : juce::String())
+                             + "-" + juce::String::toHexString (key.hashCode64()) + ".wav");
 }
 
-juce::String renderTempo (const juce::File& in, const juce::File& out, double speed,
+juce::String renderTempo (const juce::File& in, const juce::File& out, double speed, int semitones,
                           std::function<void (float)> progress, std::atomic<bool>& cancel)
 {
     using RB = RubberBand::RubberBandStretcher;
@@ -29,6 +30,7 @@ juce::String renderTempo (const juce::File& in, const juce::File& out, double sp
     RB rb ((size_t) rate, (size_t) chans,
            RB::OptionProcessOffline | RB::OptionEngineFiner | RB::OptionChannelsTogether | RB::OptionPitchHighQuality);
     rb.setTimeRatio (1.0 / speed);
+    rb.setPitchScale (std::pow (2.0, semitones / 12.0));
     rb.setExpectedInputDuration ((size_t) total);
 
     constexpr int block = 8192;

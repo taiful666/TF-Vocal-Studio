@@ -548,7 +548,7 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     lyricsBtn.setIcon (icons::gear(), false, 16.0f);
     lyricsBtn.setTooltip (u8 ("লিরিক্সের লেখার আকার, স্ক্রলের গতি, সময় মেলানো, লিরিক্স বদলানো"));
     noiseBtn.setIcon (icons::sparkle(), false, 16.0f);
-    noiseBtn.setTooltip (u8 ("এক চাপে AI নয়েজ রিমুভ চালু/বন্ধ — ফ্যান, এসি, রাস্তার শব্দ সরায়"));
+    noiseBtn.setTooltip (u8 ("বাছাই করা কণ্ঠের রেকর্ডিং থেকে এক চাপে নয়েজ সরান — ফ্যান, এসি, হিস। আগের মতো চাইলে Ctrl+Z"));
     for (auto* b : { &addBtn, &lyricsBtn, &noiseBtn })
     {
         b->setRadius (9.0f);
@@ -558,7 +558,7 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     noiseBtn.setVisible (true);
     noiseBtn.setRadius (12.0f);
     lyricsBtn.onClick = [this] { showLyricsPanel(); };
-    noiseBtn.onClick = [this] { inspector.setNoiseOn (! inspector.isNoiseOn()); updateNoiseButton(); if (toast) toast (inspector.isNoiseOn() ? u8 ("AI নয়েজ রিমুভ চালু") : u8 ("AI নয়েজ রিমুভ বন্ধ")); };
+    noiseBtn.onClick = [this] { inspector.cleanVoice (Inspector::CleanKind::noise, recordTrack()); };
     addBtn.onClick = [this] { showAddMenu(); };
 
     toStartBtn.onClick = [this] { goToStart(); };
@@ -1064,9 +1064,8 @@ void StudioView::stopAndKeep()
 
 void StudioView::updateNoiseButton()
 {
-    const bool on = inspector.isNoiseOn();
-    noiseBtn.setSelected (on);
-    noiseBtn.setText (on ? u8 ("নয়েজ রিমুভ চালু") : u8 ("নয়েজ রিমুভ বন্ধ"));
+    noiseBtn.setText (u8 ("নয়েজ সরান"));
+    noiseBtn.setEnabled (! engine.isRecording() && ! inspector.isBusy());
 }
 
 //==============================================================================

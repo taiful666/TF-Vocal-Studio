@@ -187,21 +187,57 @@ public:
         micSec->addItem (micKnobs, 96);
         micSec->summary = [this] { auto v = gainKnob->slider.getValue(); return (v > 0.05 ? "+" : "") + bn (juce::String (v, 1)) + " dB"; };
 
-        noiseSec = addSection (vocalMic, u8 ("AI নয়েজ রিমুভ"), true, icons::sparkle());
-        noiseSec->sw.setToggleState (props.getBoolValue ("noiseOn", true), juce::dontSendNotification);
+        noiseSec = addSection (vocalMic, u8 ("লাইভ মাইকে AI নয়েজ রিমুভ"), true, icons::sparkle());
+        noiseSec->sw.setToggleState (props.getBoolValue ("noiseLive", false), juce::dontSendNotification);
         noiseKnob = knobs.add (new Knob (u8 ("পরিমাণ"), 0, 100, props.getDoubleValue ("noiseAmt", 80.0), [] (double v) { return pct (v); }));
         noiseKnobs.add (*noiseKnob);
         noiseSec->addItem (noiseKnobs, 96);
-        noiseLiveRow.sw.setToggleState (props.getBoolValue ("noiseMon", false), juce::dontSendNotification);
-        noiseSec->addItem (noiseLiveRow, 42);
-        noiseInfo.text = [this] { return owner.engine.noiseAvailable() ? u8 ("রেকর্ডে ফ্যান, এসি, রাস্তার শব্দ সরিয়ে দেয়।")
+        noiseInfo.text = [this] { return owner.engine.noiseAvailable() ? u8 ("শুধু লাইভে (অনুষ্ঠানে) স্পিকারে যাওয়া কণ্ঠে। রেকর্ডিং পরিষ্কার করতে নিচের \"এক ক্লিকে পরিষ্কার\" ব্যবহার করুন।")
                                                                       : u8 ("এটা চালাতে সাউন্ড সেটিংসে ৪৮০০০ Hz বাছুন।"); };
         noiseSec->addItem (noiseInfo, 34);
         noiseSec->summary = [this] { return owner.engine.noiseAvailable() ? pct (noiseKnob->slider.getValue()) : u8 ("৪৮০০০ Hz দরকার"); };
 
         for (auto* k : { gainKnob, monKnob, noiseKnob }) k->onChange = [this] (double) { owner.applyEngineGlobals(); refreshHeaders(); };
         noiseSec->sw.onStateChange = [this] { owner.applyEngineGlobals(); };
-        noiseLiveRow.sw.onClick = [this] { owner.applyEngineGlobals(); };
+
+        // ---- one-click clean-up of the recordings (after singing; Ctrl+Z brings the original back)
+        cleanSec = addSection (vocalClean, u8 ("এক ক্লিকে পরিষ্কার"), false, icons::wand());
+        cleanSec->summary = [] { return u8 ("নয়েজ · স্পিকারের মিউজিক"); };
+        cleanKnob = knobs.add (new Knob (u8 ("নয়েজ সরানোর জোর"), 0, 100, props.getDoubleValue ("cleanStrength", 50.0), [] (double v) { return pct (v); }));
+        cleanKnob->onChange = [this] (double v) { owner.props.setValue ("cleanStrength", v); };
+        cleanKnobs.add (*cleanKnob);
+        cleanSec->addItem (cleanKnobs, 96);
+        noiseCleanBtn.onClick = [this] { owner.cleanVoice (CleanKind::noise); };
+        bleedBtn.onClick = [this] { owner.cleanVoice (CleanKind::bleed); };
+        for (auto* b : { &noiseCleanBtn, &bleedBtn }) { b->setRadius (9.0f); b->setFontSize (13.0f); }
+        noiseCleanBtn.setTooltip (u8 ("ফ্যান, এসি, হিস — চুপ থাকার সময়ের শব্দ শুনে সেটা পুরো রেকর্ডিং থেকে সরায়"));
+        bleedBtn.setTooltip (u8 ("স্পিকারে বাজা মিউজিক মাইকে ঢুকে গেলে সেটা রেকর্ডিং থেকে সরায় (হেডফোন ছাড়া গাইলে)"));
+        cleanActions.add (noiseCleanBtn);
+        cleanActions.add (bleedBtn);
+        cleanSec->addItem (cleanActions, 38);
+        cleanSec->addItem (cleanBar, 0);
+        cleanInfo.text = [] { return u8 ("আসল রেকর্ডিং বদলায় না — পছন্দ না হলে \"আগের অবস্থা\" (Ctrl+Z) চাপুন।"); };
+        cleanSec->addItem (cleanInfo, 34);
+
+        // ---- smart mix (whole song)
+        mixSec = addSection (vocalClean, u8 ("স্মার্ট মিক্স"), true, icons::sparkle());
+        mixSec->summary = [this] { return owner.project.state().smartMix > 0.001f ? pct (owner.project.state().smartMix * 100.0) : u8 ("বন্ধ"); };
+        mixKnob = knobs.add (new Knob (u8 ("মিউজিক কতটা জায়গা দেবে"), 0, 100, 100, [] (double v) { return pct (v); }));
+        mixKnob->slider.onDragEnd = [this] { applyMix(); };
+        mixKnob->onChange = [this] (double) { if (! mixKnob->slider.isMouseButtonDown()) applyMix(); };
+        mixKnobs.add (*mixKnob);
+        mixSec->addItem (mixKnobs, 96);
+        mixSec->sw.onClick = [this] { applyMix(); };
+        glueRow.sw.onClick = [this] { applyMix(); };
+        mixSec->addItem (glueRow, 42);
+        balanceBtn.setRadius (9.0f);
+        balanceBtn.onClick = [this] { owner.autoBalance(); };
+        balanceBtn.setTooltip (u8 ("কণ্ঠ মিউজিকের চেয়ে একটু উপরে বসায় — প্রকাশিত গানের মতো"));
+        mixActions.add (balanceBtn);
+        mixSec->addItem (mixActions, 38);
+        mixSec->addItem (mixBar, 0);
+        mixInfo.text = [] { return u8 ("গাওয়ার সময় মিউজিক একটু সরে কণ্ঠকে জায়গা দেয়, থামলে ফিরে আসে।"); };
+        mixSec->addItem (mixInfo, 34);
 
         liveTuneRow.sw.setToggleState (props.getBoolValue ("liveTune", false), juce::dontSendNotification);
         scaleInfo.text = [this]
@@ -253,19 +289,26 @@ public:
         scaleInfo2.text = scaleInfo.text;
         scaleSec->addItem (scaleInfo2, 34);
 
-        // ---- AI vocal remover
-        sepSec = addSection (musicMain, u8 ("AI দিয়ে আসল কণ্ঠ সরান"), false, icons::wand());
-        sepSec->summary = [] { return u8 ("কারাওকে বানান"); };
-        sepInfo.text = [] { return u8 ("গানে শিল্পীর কণ্ঠ থাকলে সরিয়ে শুধু মিউজিক রাখে।"); };
-        sepSec->addItem (sepInfo, 36);
-        sepBtn.setRadius (9.0f);
-        sepBtn.onClick = [this] { owner.runSeparation(); };
-        sepCancel.setRadius (9.0f);
-        sepCancel.onClick = [this] { owner.cancelJob(); };
-        sepActions.add (sepBtn);
-        sepActions.add (sepCancel);
-        sepSec->addItem (sepActions, 36);
-        sepSec->addItem (sepBar, 0);
+        // ---- key (scale) change, speed kept
+        keySec = addSection (musicMain, u8 ("সুর উঁচু / নিচু (কী বদলান)"), false, icons::music());
+        keySec->summary = [this] { auto* t = owner.track(); return t == nullptr || t->semitones == 0 ? u8 ("আসল") : (t->semitones > 0 ? "+" : "-") + bn (std::abs (t->semitones)); };
+        keyDown.onClick = [this] { keyWanted = juce::jmax (-6, keyWanted - 1); updateKeyRow(); };
+        keyUp.onClick = [this] { keyWanted = juce::jmin (6, keyWanted + 1); updateKeyRow(); };
+        for (auto* b : { &keyDown, &keyUp }) b->setRadius (9.0f);
+        keyRow.add (keyDown);
+        keyRow.add (keyValue);
+        keyRow.add (keyUp);
+        keySec->addItem (keyRow, 36);
+        keyApply.setRadius (9.0f);
+        keyApply.onClick = [this] { owner.applyKey (keyWanted); };
+        keyCancel.setRadius (9.0f);
+        keyCancel.onClick = [this] { owner.cancelJob(); };
+        keyActions.add (keyApply);
+        keyActions.add (keyCancel);
+        keySec->addItem (keyActions, 36);
+        keySec->addItem (keyBar, 0);
+        keyInfo.text = [] { return u8 ("গলার সাথে মেলাতে মিউজিকের সুর ধাপে ধাপে উঁচু বা নিচু করুন — গতি একই থাকে।"); };
+        keySec->addItem (keyInfo, 36);
 
         // ---- manage
         manageSec = addSection (musicMain, u8 ("মিউজিক বদলান / সরান"), false, icons::folder());
@@ -394,6 +437,16 @@ public:
 
     void refreshHeaders() { for (auto* s : sections) s->refreshHeader(); }
 
+    void applyMix()
+    {
+        if (updating) return;
+        const float amt = mixSec->sw.getToggleState() ? (float) mixKnob->slider.getValue() / 100.0f : 0.0f;
+        const auto& st = owner.project.state();
+        if (std::abs (amt - st.smartMix) > 0.001f || glueRow.sw.getToggleState() != st.glue)
+            owner.project.setMix (amt, glueRow.sw.getToggleState());
+        refreshHeaders();
+    }
+
     /** Reads the selected track into the widgets (no notifications). */
     void refresh()
     {
@@ -404,6 +457,7 @@ public:
         for (auto* s : vocalPresets.sections) s->setVisible (vocal);
         for (auto* s : vocalFx.sections) s->setVisible (vocal);
         for (auto* s : vocalMic.sections) s->setVisible (vocal);
+        for (auto* s : vocalClean.sections) s->setVisible (vocal);
         for (auto* s : musicMain.sections) s->setVisible (music);
         for (auto* c : std::initializer_list<juce::Component*> { &meter, &trackKnobs, &muteBtn, &soloBtn }) c->setVisible (t != nullptr);
         if (t != nullptr)
@@ -419,17 +473,26 @@ public:
             for (auto& pk : paramKnobs) pk.first->setValue (owner.fx.get (pk.second));
             for (auto& ss : switchSecs) ss.first->sw.setToggleState (owner.fx.isOn (ss.second), juce::dontSendNotification);
             syncAB();
+            const auto& st = owner.project.state();
+            mixSec->sw.setToggleState (st.smartMix > 0.001f, juce::dontSendNotification);
+            if (st.smartMix > 0.001f) mixKnob->setValue (st.smartMix * 100.0);
+            glueRow.sw.setToggleState (st.glue, juce::dontSendNotification);
+            const bool b = owner.busy.load();
+            noiseCleanBtn.setEnabled (! b); bleedBtn.setEnabled (! b); balanceBtn.setEnabled (! b);
+            cleanSec->setItemHeight (cleanBar, cleanBar.status.isNotEmpty() ? 30 : 0);
+            mixSec->setItemHeight (mixBar, mixBar.status.isNotEmpty() ? 30 : 0);
         }
         if (music)
         {
             const bool b = owner.busy.load();
             if (! b) speedSlider.slider.setValue (t->speed * 100.0, juce::dontSendNotification);
             updateSpeedButtons();
-            sepBtn.setEnabled (! b);
+            if (! b) keyWanted = t->semitones;
+            updateKeyRow();
             speedCancel.setVisible (b && jobIsSpeed);
-            sepCancel.setVisible (b && ! jobIsSpeed);
+            keyCancel.setVisible (b && ! jobIsSpeed);
             speedSec->setItemHeight (speedBar, b && jobIsSpeed ? 30 : (jobIsSpeed && speedBar.status.isNotEmpty() ? 30 : 0));
-            sepSec->setItemHeight (sepBar, ! jobIsSpeed && sepBar.status.isNotEmpty() ? 30 : 0);
+            keySec->setItemHeight (keyBar, (b && ! jobIsSpeed) || (! jobIsSpeed && keyBar.status.isNotEmpty()) ? 30 : 0);
         }
         syncScale();
         refreshHeaders();
@@ -469,7 +532,7 @@ public:
             g.bounds = { 0, top, w, sy - top + 8 };
             y = g.bounds.getBottom() + 14;
         };
-        for (auto* g : { &vocalPresets, &vocalFx, &vocalMic, &musicMain }) placeGroup (*g);
+        for (auto* g : { &vocalPresets, &vocalFx, &vocalClean, &vocalMic, &musicMain }) placeGroup (*g);
 
         // preset category well
         auto cw = catHolder.getLocalBounds().reduced (3);
@@ -514,7 +577,7 @@ public:
             g.setColour (col::muted); g.setFont (font (12.0f));
             g.drawText (vocal ? u8 ("কণ্ঠ ট্র্যাক") : u8 ("মিউজিক ট্র্যাক"), r, juce::Justification::centredRight, false);
         }
-        for (auto* gr : { &vocalPresets, &vocalFx, &vocalMic, &musicMain })
+        for (auto* gr : { &vocalPresets, &vocalFx, &vocalClean, &vocalMic, &musicMain })
         {
             if (gr->bounds.isEmpty()) continue;
             card (gr->bounds);
@@ -544,11 +607,13 @@ public:
     // groups
     Group vocalPresets { u8 ("প্রিসেট"), u8 ("এক চাপে পুরো সাউন্ড") },
           vocalFx { u8 ("ইফেক্ট চেইন"), u8 ("উপর থেকে নিচে কাজ করে") },
+          vocalClean { u8 ("পরিষ্কার ও মিক্স"), u8 ("রেকর্ডের পর এক ক্লিকে") },
           vocalMic { u8 ("মাইক"), u8 ("সব কণ্ঠ ট্র্যাকে একই") },
           musicMain { u8 ("মিউজিক সেটিংস"), {} };
     juce::OwnedArray<FxSection> sections;
     FxSection *presetSec = nullptr, *micSec = nullptr, *noiseSec = nullptr,
-              *speedSec = nullptr, *scaleSec = nullptr, *sepSec = nullptr, *manageSec = nullptr;
+              *speedSec = nullptr, *scaleSec = nullptr, *keySec = nullptr, *manageSec = nullptr,
+              *cleanSec = nullptr, *mixSec = nullptr;
 
     // presets
     struct CatHolder : public juce::Component
@@ -587,12 +652,41 @@ public:
 
     // music
     juce::OwnedArray<TFButton> speedButtons;
-    ButtonPair speedPresetRow, speedActions, sepActions, manageActions;
+    ButtonPair speedPresetRow, speedActions, keyActions, keyRow, manageActions, cleanActions, mixActions;
     LabeledSlider speedSlider { u8 ("গতি"), 50, 150, 100, [] (double v) { return pct (v); } };
     TFButton speedApply { u8 ("এই গতি প্রয়োগ করুন"), TFButton::Style::accent }, speedCancel { u8 ("বাতিল") };
-    JobBar speedBar, sepBar;
-    InfoText speedInfo, sepInfo, fileInfo;
-    TFButton sepBtn { u8 ("কণ্ঠ সরিয়ে কারাওকে বানান"), TFButton::Style::accent }, sepCancel { u8 ("বাতিল") };
+    JobBar speedBar, keyBar, cleanBar, mixBar;
+    InfoText speedInfo, keyInfo, fileInfo, cleanInfo, mixInfo;
+    TFButton keyDown { u8 ("− নিচু") }, keyUp { u8 ("+ উঁচু") },
+             keyApply { u8 ("এই সুর প্রয়োগ করুন"), TFButton::Style::accent }, keyCancel { u8 ("বাতিল") };
+    struct KeyValue : public juce::Component
+    {
+        juce::String text;
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (col::well); g.fillRoundedRectangle (getLocalBounds().toFloat(), 9.0f);
+            g.setColour (col::ink); g.setFont (font (15.0f, Weight::semibold));
+            g.drawText (text, getLocalBounds(), juce::Justification::centred);
+        }
+    } keyValue;
+    int keyWanted = 0;
+    void updateKeyRow()
+    {
+        auto* t = owner.track();
+        keyValue.text = keyWanted == 0 ? u8 ("আসল সুর") : (keyWanted > 0 ? u8 ("+") : u8 ("−")) + bn (std::abs (keyWanted)) + u8 (" ধাপ");
+        keyValue.repaint();
+        const bool same = t != nullptr && t->semitones == keyWanted;
+        keyApply.setEnabled (! same && ! owner.busy.load());
+        keyApply.setText (same ? u8 ("এই সুরই চলছে") : u8 ("এই সুর প্রয়োগ করুন"));
+        keyDown.setEnabled (keyWanted > -6);
+        keyUp.setEnabled (keyWanted < 6);
+    }
+    TFButton noiseCleanBtn { u8 ("নয়েজ সরান"), TFButton::Style::accent }, bleedBtn { u8 ("স্পিকারের মিউজিক সরান") },
+             balanceBtn { u8 ("কণ্ঠ-মিউজিক ব্যালান্স করুন"), TFButton::Style::accent };
+    Knob* cleanKnob = nullptr;
+    Knob* mixKnob = nullptr;
+    KnobRow cleanKnobs, mixKnobs;
+    SwitchRow glueRow { u8 ("মাস্টার গ্লু (এক গানের মতো মেশায়)"), u8 ("হালকা কম্প্রেসর, মিউজিক আর কণ্ঠকে এক সুতোয় বাঁধে") };
     TFButton changeBtn { u8 ("অন্য মিউজিক দিন") }, removeBtn { u8 ("মিউজিক সরান") };
 };
 

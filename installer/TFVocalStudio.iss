@@ -47,8 +47,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "TF Vocal Studio.exe"; Flags: ignoreversion
 Source: "..\LICENSE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
-; ffmpeg (video/audio import), AI separation engine + model
+; ffmpeg (video/audio import and MP4 export)
 Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; the AI separation engine of v1.0 is no longer used (its quality was not good enough)
+Type: files; Name: "{app}\sherpa-onnx-c-api.dll"
+Type: files; Name: "{app}\onnxruntime.dll"
+Type: files; Name: "{app}\onnxruntime_providers_shared.dll"
+Type: filesandordirs; Name: "{app}\models"
 
 [Icons]
 Name: "{autoprograms}\TF Vocal Studio"; Filename: "{app}\TF Vocal Studio.exe"
@@ -56,3 +63,5 @@ Name: "{autodesktop}\TF Vocal Studio"; Filename: "{app}\TF Vocal Studio.exe"; Ta
 
 [Run]
 Filename: "{app}\TF Vocal Studio.exe"; Description: "{cm:LaunchProgram,TF Vocal Studio}"; Flags: nowait postinstall skipifsilent
+; an update installed from inside the app (silent) opens the app again by itself
+Filename: "{app}\TF Vocal Studio.exe"; Flags: nowait skipifnotsilent

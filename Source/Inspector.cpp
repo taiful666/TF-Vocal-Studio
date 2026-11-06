@@ -1,4 +1,5 @@
 #include "Inspector.h"
+#include "MixTools.h"
 #include "InspectorContent.h"
 #include "Stretch.h"
 #include "VocalFx.h"
@@ -288,12 +289,11 @@ void Inspector::applyEngineGlobals()
     engine.setMonitorVolume ((float) c.monKnob->slider.getValue() / 100.0f);
     engine.setNoiseEnabled (c.noiseSec->sw.getToggleState());
     engine.setNoiseAmount ((float) c.noiseKnob->slider.getValue() / 100.0f);
-    engine.setNoiseInMonitor (c.noiseLiveRow.sw.getToggleState());
+    engine.setNoiseInMonitor (c.noiseSec->sw.getToggleState());
     props.setValue ("gainDb", c.gainKnob->slider.getValue());
     props.setValue ("monitorVol", c.monKnob->slider.getValue());
-    props.setValue ("noiseOn", c.noiseSec->sw.getToggleState());
+    props.setValue ("noiseLive", c.noiseSec->sw.getToggleState());
     props.setValue ("noiseAmt", c.noiseKnob->slider.getValue());
-    props.setValue ("noiseMon", c.noiseLiveRow.sw.getToggleState());
     c.refreshHeaders();
     if (onNoiseChanged) onNoiseChanged();
 }
@@ -507,106 +507,187 @@ void Inspector::cancelJob() { cancel = true; }
 void Inspector::applySpeed (double speed)
 {
     auto* t = track();
+    if (t == nullptr) return;
+    renderMusic (speed, t->semitones, true);
+}
+
+void Inspector::applyKey (int semitones)
+{
+    auto* t = track();
+    if (t == nullptr) return;
+    renderMusic (t->speed, juce::jlimit (-6, 6, semitones), false);
+}
+
+void Inspector::renderMusic (double speed, int semis, bool isSpeed)
+{
+    auto* t = track();
     if (t == nullptr || t->kind != TrackKind::music || busy.exchange (true)) return;
     if (engine.isRecording()) { busy = false; return; }
     const auto id = t->id;
     const auto base = t->baseAudio;
+    const double oldSpeed = t->speed;
     cancel = false;
-    content->jobIsSpeed = true;
-    content->speedBar.progress = 0.0f;
-    content->speedBar.status = u8 ("গতি বদলানো হচ্ছে…");
+    content->jobIsSpeed = isSpeed;
+    auto& bar = isSpeed ? content->speedBar : content->keyBar;
+    bar.progress = 0.0f;
+    bar.status = isSpeed ? u8 ("গতি বদলানো হচ্ছে…") : u8 ("সুর বদলানো হচ্ছে…");
     refresh();
 
-    if (std::abs (speed - 1.0) < 0.001)
+    auto done = [this, id, speed, semis, isSpeed, oldSpeed] (const juce::File& out)
     {
-        project.replaceMusicAudio (id, base, 1.0);
+        if (isSpeed || std::abs (speed - oldSpeed) > 0.0005) project.replaceMusicAudio (id, out, speed);
+        if (semis != (track() != nullptr ? track()->semitones : 0) || ! isSpeed) project.setMusicKey (id, out, semis);
+    };
+
+    if (std::abs (speed - 1.0) < 0.001 && semis == 0)
+    {
+        done (base);
         busy = false;
-        content->speedBar.status = {};
+        bar.status = {};
         refresh();
-        if (toast) toast (u8 ("আসল গতিতে ফিরে এসেছে"));
+        if (toast) toast (isSpeed ? u8 ("আসল গতিতে ফিরে এসেছে") : u8 ("আসল সুরে ফিরে এসেছে"));
         return;
     }
 
     juce::Component::SafePointer<Inspector> safe (this);
-    jobs.addJob ([this, safe, id, base, speed]
+    jobs.addJob ([this, safe, base, speed, semis, isSpeed, done]
     {
-        const auto out = tempoCacheFor (base, speed);
+        const auto out = tempoCacheFor (base, speed, semis);
         juce::String err;
         if (! out.existsAsFile())
-            err = renderTempo (base, out, speed, [safe] (float p)
+            err = renderTempo (base, out, speed, semis, [safe, isSpeed] (float p)
             {
-                juce::MessageManager::callAsync ([safe, p] { if (safe != nullptr) { safe->content->speedBar.progress = p; safe->content->speedBar.repaint(); } });
+                juce::MessageManager::callAsync ([safe, p, isSpeed] { if (safe != nullptr) { auto& b = isSpeed ? safe->content->speedBar : safe->content->keyBar; b.progress = p; b.repaint(); } });
             }, cancel);
         const bool cancelled = cancel.load();
-        juce::MessageManager::callAsync ([safe, id, out, speed, err, cancelled]
+        juce::MessageManager::callAsync ([safe, out, speed, semis, err, cancelled, isSpeed, done]
         {
             if (safe == nullptr) return;
             safe->busy = false;
-            auto& c = *safe->content;
-            if (cancelled) c.speedBar.status = {};
-            else if (err.isNotEmpty()) c.speedBar.status = err;
+            auto& b = isSpeed ? safe->content->speedBar : safe->content->keyBar;
+            if (cancelled) b.status = {};
+            else if (err.isNotEmpty()) b.status = err;
             else
             {
-                c.speedBar.status = {};
-                safe->project.replaceMusicAudio (id, out, speed);
-                if (safe->toast) safe->toast (u8 ("গতি এখন ") + pct (speed * 100.0) + u8 (" — সুর একই আছে"));
+                b.status = {};
+                done (out);
+                if (safe->toast)
+                    safe->toast (isSpeed ? u8 ("গতি এখন ") + pct (speed * 100.0) + u8 (" — সুর একই আছে")
+                                         : (semis == 0 ? u8 ("আসল সুরে ফিরে এসেছে")
+                                                       : u8 ("সুর ") + (semis > 0 ? u8 ("উঁচু ") : u8 ("নিচু ")) + bn (std::abs (semis)) + u8 (" ধাপ — গতি একই আছে")));
             }
             safe->refresh();
         });
     });
 }
 
-void Inspector::runSeparation()
+//==============================================================================
+// Recording clean-up (one click) and smart mix
+//==============================================================================
+void Inspector::cleanVoice (CleanKind kind, const juce::String& forTrack)
 {
-    auto* t = track();
-    if (t == nullptr || t->kind != TrackKind::music) return;
-    juce::String why;
-    if (! Separator::isAvailable (&why)) { if (toast) toast (why); return; }
-    if (busy.exchange (true)) return;
-    const auto id = t->id;
-    const auto base = t->baseAudio;
-    const double speed = t->speed;
-    const auto name = t->source.getFileNameWithoutExtension();
-    cancel = false;
-    content->jobIsSpeed = false;
-    content->sepBar.progress = 0.0f;
-    content->sepBar.status = u8 ("শুরু হচ্ছে…");
-    refresh();
+    const auto id = forTrack.isNotEmpty() ? forTrack : trackId;
+    const int idx = project.state().indexOf (id);
+    if (idx < 0) return;
+    const auto& tr = project.state().tracks.getReference (idx);
+    if (tr.kind != TrackKind::vocal) { if (toast) toast (u8 ("কণ্ঠের ট্র্যাক বাছাই করুন")); return; }
+    if (tr.clips.isEmpty()) { if (toast) toast (u8 ("এই ট্র্যাকে এখনো কোনো রেকর্ডিং নেই")); return; }
+    if (engine.isRecording() || busy.exchange (true)) return;
 
-    auto musicOut = AudioEngine::songsFolder().getChildFile (juce::File::createLegalFileName (name + u8 (" (কারাওকে)")) + ".wav").getNonexistentSibling();
-    auto vocalDir = AudioEngine::appFolder().getChildFile ("Separated");
-    vocalDir.createDirectory();
-    auto vocalOut = vocalDir.getChildFile (juce::File::createLegalFileName (name + u8 (" (কণ্ঠ)")) + ".wav").getNonexistentSibling();
+    // the files to treat (each once), with their speaker recordings
+    std::vector<std::pair<juce::File, juce::File>> files;
+    const juce::String tag = kind == CleanKind::noise ? "_clean" : "_noleak";
+    for (auto& c : tr.clips)
+    {
+        if (c.file.getFileNameWithoutExtension().contains (tag)) continue;   // already done
+        bool seen = false;
+        for (auto& f : files) seen |= f.first == c.file;
+        if (! seen) files.push_back ({ c.file, c.speaker });
+    }
+    if (files.empty())
+    {
+        busy = false;
+        if (toast) toast (kind == CleanKind::noise ? u8 ("এই কণ্ঠ আগেই পরিষ্কার করা হয়েছে") : u8 ("স্পিকারের মিউজিক আগেই সরানো হয়েছে"));
+        return;
+    }
+    cancel = false;
+    auto& bar = content->cleanBar;
+    bar.progress = 0.0f;
+    bar.status = kind == CleanKind::noise ? u8 ("নয়েজ সরানো হচ্ছে…") : u8 ("স্পিকারের মিউজিক সরানো হচ্ছে…");
+    refresh();
+    const float strength = (float) content->cleanKnob->slider.getValue();
 
     juce::Component::SafePointer<Inspector> safe (this);
-    jobs.addJob ([this, safe, id, base, speed, musicOut, vocalOut]
+    jobs.addJob ([this, safe, files, kind, id, tag, strength]
     {
-        auto res = Separator::run (base, musicOut, vocalOut, [safe] (float p, const juce::String& msg)
+        std::map<juce::String, juce::File> done;
+        juce::StringArray errors;
+        int skipped = 0;
+        double erleSum = 0.0; int erleN = 0;
+        for (size_t i = 0; i < files.size() && ! cancel.load(); ++i)
         {
-            juce::MessageManager::callAsync ([safe, p, msg] { if (safe != nullptr) { safe->content->sepBar.progress = p * 0.95f; safe->content->sepBar.status = msg; safe->content->sepBar.repaint(); } });
-        }, cancel);
-        juce::File playFile = res.music;
-        if (res.error.isEmpty() && std::abs (speed - 1.0) > 0.001 && ! cancel.load())
-        {
-            playFile = tempoCacheFor (res.music, speed);
-            auto err = renderTempo (res.music, playFile, speed, {}, cancel);
-            if (err.isNotEmpty()) res.error = err;
+            const auto& src = files[i].first;
+            auto out = src.getSiblingFile (src.getFileNameWithoutExtension() + tag + ".wav").getNonexistentSibling();
+            auto prog = [safe, i, n = files.size()] (float p)
+            {
+                juce::MessageManager::callAsync ([safe, p, i, n] { if (safe != nullptr) { safe->content->cleanBar.progress = ((float) i + p) / (float) n; safe->content->cleanBar.repaint(); } });
+            };
+            juce::String err;
+            if (kind == CleanKind::noise)
+                err = mixtools::reduceNoise (src, out, 6.0f + strength * 0.12f, prog, cancel);   // 6..18 dB
+            else
+            {
+                if (! files[i].second.existsAsFile()) { ++skipped; continue; }
+                double erle = 0.0;
+                err = mixtools::removeBleed (src, files[i].second, out, prog, cancel, &erle);
+                if (err == "NOLEAK") { ++skipped; continue; }
+                if (err.isEmpty()) { erleSum += erle; ++erleN; }
+            }
+            if (err.isEmpty()) done[src.getFullPathName()] = out;
+            else errors.add (err);
         }
         const bool cancelled = cancel.load();
-        juce::MessageManager::callAsync ([safe, id, res, playFile, speed, cancelled]
+        juce::MessageManager::callAsync ([safe, done, errors, cancelled, kind, id, skipped, erleN]
         {
             if (safe == nullptr) return;
             safe->busy = false;
-            auto& c = *safe->content;
-            if (cancelled) c.sepBar.status = {};
-            else if (res.error.isNotEmpty()) c.sepBar.status = res.error;
-            else
-            {
-                c.sepBar.status = u8 ("হয়ে গেছে — এখন শুধু মিউজিক বাজছে");
-                c.sepBar.progress = 1.0f;
-                safe->project.replaceMusicAudio (id, playFile, speed, res.music);
-                if (safe->toast) safe->toast (u8 ("আসল কণ্ঠ সরানো হয়েছে — এখন আপনি গাইতে পারেন"));
-            }
+            auto& b = safe->content->cleanBar;
+            b.status = {};
+            if (! cancelled && ! done.empty()) safe->project.replaceClipFiles (id, done);
+            if (cancelled) {}
+            else if (! errors.isEmpty()) b.status = errors[0];
+            else if (done.empty() && kind == CleanKind::bleed)
+                b.status = u8 ("স্পিকারের মিউজিক মাইকে আসেনি (বা পুরোনো রেকর্ডিং) — কিছু বদলানোর দরকার নেই।");
+            else if (safe->toast)
+                safe->toast (kind == CleanKind::noise ? u8 ("নয়েজ সরানো হয়েছে — আগের মতো চাইলে Ctrl+Z")
+                                                      : u8 ("স্পিকার থেকে আসা মিউজিক সরানো হয়েছে — আগের মতো চাইলে Ctrl+Z"));
+            juce::ignoreUnused (skipped, erleN);
+            safe->refresh();
+        });
+    });
+}
+
+void Inspector::autoBalance()
+{
+    if (busy.exchange (true)) return;
+    if (project.state().musicTrack() == nullptr) { busy = false; if (toast) toast (u8 ("মিউজিক থাকলে তবেই ব্যালান্স করা যায়")); return; }
+    auto st = project.state();
+    const int key = engine.getEffectiveKey();
+    content->mixBar.status = u8 ("কণ্ঠ আর মিউজিক মাপা হচ্ছে…");
+    content->mixBar.progress = 0.3f;
+    refresh();
+    juce::Component::SafePointer<Inspector> safe (this);
+    jobs.addJob ([safe, st, key]
+    {
+        auto gains = AudioEngine::computeBalance (st, key);
+        juce::MessageManager::callAsync ([safe, gains]
+        {
+            if (safe == nullptr) return;
+            safe->busy = false;
+            safe->content->mixBar.status = {};
+            if (gains.empty()) { if (safe->toast) safe->toast (u8 ("ব্যালান্স করার মতো কণ্ঠ পাওয়া যায়নি")); safe->refresh(); return; }
+            safe->project.setTrackGains (gains);
+            if (safe->toast) safe->toast (u8 ("কণ্ঠ আর মিউজিকের ভলিউম মিলিয়ে দেওয়া হয়েছে"));
             safe->refresh();
         });
     });

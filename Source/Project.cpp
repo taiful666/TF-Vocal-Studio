@@ -444,6 +444,14 @@ void Project::replaceClipFiles (const juce::String& trackId, const std::map<juce
     changed();
 }
 
+void Project::setTrackGains (const std::map<juce::String, float>& gains)
+{
+    pushUndo();
+    for (auto& t : st.tracks)
+        if (auto it = gains.find (t.id); it != gains.end()) t.gain = juce::jlimit (0.0f, 1.5f, it->second);
+    changed();
+}
+
 void Project::setMix (float smartMix, bool glue)
 {
     pushUndo();

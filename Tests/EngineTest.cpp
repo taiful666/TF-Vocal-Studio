@@ -724,23 +724,6 @@ static void testMedia (const juce::File& tmp, const juce::File& song)
         CHECK (e.isEmpty() && pi.hasVideo && pi.hasAudio && std::abs (pi.duration - 7.0) < 0.2, "MP4 from the lyrics video (" + juce::String (pi.duration, 2) + " s)" + (e.isEmpty() ? juce::String() : " " + e));
     }
 
-    std::cout << "\nAI music / voice separation\n";
-    juce::String why;
-    if (! Separator::isAvailable (&why)) { std::cout << "  SKIP  " << why << "\n"; return; }
-    auto music = tmp.getChildFile ("music.wav"), vocals = tmp.getChildFile ("vocals.wav");
-    float sp = 0;
-    const auto st = juce::Time::getMillisecondCounterHiRes();
-    auto res = Separator::run (song, music, vocals, [&] (float p, const juce::String&) { sp = p; }, cancel);
-    const auto secs = (juce::Time::getMillisecondCounterHiRes() - st) / 1000.0;
-    std::unique_ptr<juce::AudioFormatReader> rm (fm.createReaderFor (music)), rv (fm.createReaderFor (vocals));
-    CHECK (res.error.isEmpty() && rm != nullptr && rv != nullptr, "separation produced music and vocal files" + (res.error.isEmpty() ? juce::String() : " (" + res.error + ")"));
-    if (rm != nullptr)
-    {
-        std::unique_ptr<juce::AudioFormatReader> rs (fm.createReaderFor (song));
-        const double lenS = (double) rs->lengthInSamples / rs->sampleRate, lenM = (double) rm->lengthInSamples / rm->sampleRate;
-        CHECK (std::abs (lenS - lenM) < 0.1, "separated music has the song's length");
-        std::cout << "        20 s song separated in " << juce::String (secs, 1) << " s\n";
-    }
 }
 
 //==============================================================================
@@ -1244,7 +1227,7 @@ int main()
         auto fast = tmp.getChildFile ("tone125.wav");
         float lastP = 0;
         const auto t0 = juce::Time::getMillisecondCounterHiRes();
-        auto e = renderTempo (tone, fast, 1.25, [&] (float p) { lastP = p; }, cancel);
+        auto e = renderTempo (tone, fast, 1.25, 0, [&] (float p) { lastP = p; }, cancel);
         const auto secs = (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0;
         auto x = readMono (fast);
         CHECK (e.isEmpty() && std::abs (x.size() / 48000.0 - 4.0) < 0.05, "125% speed: 5 s -> " + juce::String (x.size() / 48000.0, 2) + " s (" + juce::String (secs, 1) + " s to render)");

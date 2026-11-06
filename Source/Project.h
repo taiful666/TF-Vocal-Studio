@@ -2,6 +2,7 @@
 
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
+#include <map>
 
 namespace tf
 {
@@ -107,6 +108,8 @@ public:
     /** Replaces the audio file of clips (noise or leak removal): same timing, new file. */
     void replaceClipFiles (const juce::String& trackId, const std::map<juce::String, juce::File>& oldToNew);
     void setMix (float smartMix, bool glue);
+    /** Several track volumes at once (one undo step). */
+    void setTrackGains (const std::map<juce::String, float>& gains);
     /** Changes the key (semitones) and the audio of a music track together. */
     void setMusicKey (const juce::String& trackId, const juce::File& newAudio, int semitones);
     void setTrack (const TrackInfo& t, bool undoable = true);

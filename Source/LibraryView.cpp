@@ -122,11 +122,6 @@ LibraryView::LibraryView (AudioEngine& e) : engine (e)
     addBtn.onClick = [this] { if (showingTakes) { if (onNewProject) onNewProject(); } else chooseSongs(); };
     addAndMakeVisible (addBtn);
 
-    sepBtn.setIcon (icons::sparkle(), false, 18.0f);
-    sepBtn.onClick = [this] { chooseForSeparation(); };
-    sepCancel.onClick = [this] { sepCancelFlag = true; };
-    addAndMakeVisible (sepBtn);
-    addChildComponent (sepCancel);
 
     folderBtn.setIcon (icons::folder(), false, 18.0f);
     folderBtn.onClick = [this] { (showingTakes ? Project::projectsFolder() : AudioEngine::songsFolder()).revealToUser(); };
@@ -149,7 +144,6 @@ LibraryView::LibraryView (AudioEngine& e) : engine (e)
 
 LibraryView::~LibraryView()
 {
-    sepCancelFlag = true;
     jobPool.removeAllJobs (true, 15000);
     durPool.removeAllJobs (true, 3000);
 }
@@ -301,65 +295,6 @@ void LibraryView::addSongs (const juce::Array<juce::File>& files)
     });
 }
 
-void LibraryView::chooseForSeparation()
-{
-    if (sepBusy.load()) return;
-    juce::String why;
-    if (! Separator::isAvailable (&why)) { if (toast) toast (why); return; }
-    chooser = std::make_unique<juce::FileChooser> (u8 ("যে গান থেকে কণ্ঠ সরাতে চান সেটি বাছুন"),
-                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory), media::allPatterns());
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) separate (f); });
-}
-
-void LibraryView::separate (const juce::File& song)
-{
-    if (sepBusy.exchange (true)) return;
-    juce::String why;
-    if (! Separator::isAvailable (&why)) { sepBusy = false; if (toast) toast (why); return; }
-    sepCancelFlag = false;
-    sepProgress = 0.0f;
-    sepName = song.getFileNameWithoutExtension();
-    sepStatus = u8 ("শুরু হচ্ছে…");
-    sepBtn.setEnabled (false);
-    sepCancel.setVisible (true);
-    resized();
-    repaint();
-
-    auto musicOut = AudioEngine::songsFolder().getChildFile (juce::File::createLegalFileName (sepName + u8 (" (কারাওকে)")) + ".wav").getNonexistentSibling();
-    auto vocalDir = AudioEngine::appFolder().getChildFile ("Separated");
-    vocalDir.createDirectory();
-    auto vocalOut = vocalDir.getChildFile (juce::File::createLegalFileName (sepName + u8 (" (কণ্ঠ)")) + ".wav").getNonexistentSibling();
-
-    juce::Component::SafePointer<LibraryView> safe (this);
-    jobPool.addJob ([this, safe, song, musicOut, vocalOut]
-    {
-        auto res = Separator::run (song, musicOut, vocalOut,
-            [safe] (float p, const juce::String& msg)
-            {
-                juce::MessageManager::callAsync ([safe, p, msg] { if (safe != nullptr) { safe->sepProgress = p; safe->sepStatus = msg; safe->repaint (safe->asideCard); } });
-            }, sepCancelFlag);
-        if (res.error.isEmpty())
-        {
-            auto lf = Lyrics::findFor (song);
-            if (lf.existsAsFile()) lf.copyFileTo (musicOut.withFileExtension (lf.getFileExtension()));
-        }
-        juce::MessageManager::callAsync ([safe, res]
-        {
-            if (safe == nullptr) return;
-            safe->sepBusy = false;
-            safe->sepBtn.setEnabled (true);
-            safe->sepCancel.setVisible (false);
-            safe->sepStatus = res.error.isEmpty() ? u8 ("তৈরি হয়েছে: ") + res.music.getFileNameWithoutExtension() : res.error;
-            safe->sepProgress = res.error.isEmpty() ? 1.0f : 0.0f;
-            if (res.error.isEmpty() && safe->toast) safe->toast (u8 ("কারাওকে তৈরি — গানের তালিকায় যোগ হয়েছে"));
-            safe->setTab (false);
-            safe->resized();
-            safe->repaint();
-        });
-    });
-}
-
 bool LibraryView::isInterestedInFileDrag (const juce::StringArray& files)
 {
     for (auto& f : files)
@@ -382,7 +317,6 @@ void LibraryView::showRowMenu (int row)
     m.addItem (1, it.isTake ? u8 ("খুলুন") : u8 ("গাইব"));
     m.addItem (5, u8 ("নাম বদলান…"));
     m.addItem (2, u8 ("ফোল্ডারে দেখুন"));
-    if (! it.isTake) m.addItem (4, u8 ("AI দিয়ে কণ্ঠ ও মিউজিক আলাদা করুন"), ! sepBusy.load());
     m.addSeparator();
     m.addItem (3, u8 ("মুছে ফেলুন…"));
     m.showMenuAsync ({}, [this, it] (int r)
@@ -390,7 +324,6 @@ void LibraryView::showRowMenu (int row)
         if (r == 1) { if (it.isTake) { if (onOpenProject) onOpenProject (it.file); } else if (onSing) onSing (it.file); }
         if (r == 2) it.file.revealToUser();
         if (r == 5) renameItem (it);
-        if (r == 4) separate (it.file);
         if (r == 3) deleteItem (it);
     });
 }
@@ -496,11 +429,6 @@ void LibraryView::resized()
     auto a = asideCard.reduced (20);
     folderBtn.setBounds (a.removeFromBottom (46));
     a.removeFromBottom (14);
-    auto sepRow = a.removeFromBottom (46);
-    if (sepCancel.isVisible()) { sepCancel.setBounds (sepRow.removeFromRight (100)); sepRow.removeFromRight (8); }
-    sepBtn.setBounds (sepRow);
-    a.removeFromBottom (10);
-    sepBar = a.removeFromBottom (50);
 }
 
 void LibraryView::paintOverChildren (juce::Graphics& g)
@@ -546,37 +474,21 @@ void LibraryView::paint (juce::Graphics& g)
         g.drawText (sub, e.withY (e.getCentreY() + 2).withHeight (26), juce::Justification::centred);
     }
 
-    // aside: AI karaoke maker + lyrics tip
+    // aside: where karaoke music comes from + lyrics tip
     auto ac = asideCard.toFloat().reduced (0.5f);
     g.setColour (col::panel);  g.fillRoundedRectangle (ac, 18.0f);
     g.setColour (col::border); g.drawRoundedRectangle (ac, 18.0f, 1.0f);
     auto a = asideCard.reduced (20);
     g.setColour (col::ink);
     g.setFont (font (18.0f, Weight::semibold));
-    g.drawText (u8 ("AI দিয়ে কারাওকে বানান"), a.removeFromTop (30), juce::Justification::centredLeft);
+    g.drawText (u8 ("কারাওকে মিউজিক"), a.removeFromTop (30), juce::Justification::centredLeft);
     a.removeFromTop (4);
     g.setColour (col::muted);
     g.setFont (font (14.5f));
-    g.drawFittedText (u8 ("যেকোনো গান বা ভিডিও দিন — AI শিল্পীর কণ্ঠ সরিয়ে শুধু মিউজিক রেখে দেবে, ইন্টারনেট লাগবে না। "
-                          "তৈরি কারাওকে গানের তালিকায় যোগ হবে। একটা গানে সাধারণত ১–২ মিনিট লাগে।\n\n"
+    g.drawFittedText (u8 ("YouTube থেকে নামানো কারাওকে বা ইন্সট্রুমেন্টাল ভিডিও/অডিও সরাসরি দিন।\n\n"
+                          "আসল গান থেকে মিউজিক আলাদা করতে চাইলে ফ্রি \"Ultimate Vocal Remover (UVR)\" সফটওয়্যারে "
+                          "RoFormer মডেল দিয়ে আলাদা করে মিউজিক ফাইলটা এখানে দিন — সবচেয়ে পরিষ্কার ফল পাবেন।\n\n"
                           "লিরিক্স: গানের পাশে একই নামের .lrc বা .txt ফাইল রাখুন, অথবা স্টুডিওতে \"লিরিক্স লিখুন\" চাপুন।"),
-                      a.withBottom (sepBar.getY() - 6), juce::Justification::topLeft, 10, 1.0f);
-
-    if (sepBusy.load() || sepStatus.isNotEmpty())
-    {
-        auto sb = sepBar.toFloat();
-        g.setColour (col::ink);
-        g.setFont (font (14.0f, Weight::medium));
-        g.drawText (sepBusy.load() ? sepName : sepStatus, sb.removeFromTop (22), juce::Justification::centredLeft, true);
-        if (sepBusy.load())
-        {
-            auto bar = sb.removeFromTop (10).withTrimmedTop (2);
-            g.setColour (col::border); g.fillRoundedRectangle (bar, 4.0f);
-            g.setColour (col::accent); g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, sepProgress)), 4.0f);
-            g.setColour (col::muted);
-            g.setFont (font (13.0f));
-            g.drawText (sepStatus + "  " + bn ((int) (sepProgress * 100)) + "%", sb, juce::Justification::centredLeft, true);
-        }
-    }
+                      a.withBottom (folderBtn.getY() - 6), juce::Justification::topLeft, 14, 1.0f);
 }
 }

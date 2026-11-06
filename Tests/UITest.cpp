@@ -323,16 +323,21 @@ int UITest::run()
     }
 
     // ------------------------------------------------------------------ 7. one-click noise remover
-    std::cout << "\n7. Noise remover\n";
+    std::cout << "\n7. Noise remover (one click, on the recording)\n";
     {
-        const bool before = insp.isNoiseOn();
-        click (studio.noiseBtn);
+        tl.selectTrack (voiceId());
         pump (50);
-        CHECK (insp.isNoiseOn() != before && props->getBoolValue ("noiseOn") == insp.isNoiseOn() && studio.noiseBtn.isSelected() == insp.isNoiseOn(),
-               "one click turns AI noise removal " + juce::String (insp.isNoiseOn() ? "on" : "off") + " (and is remembered)");
+        const auto filesBefore = state().tracks.getReference (voiceIndex()).clips.getReference (0).file;
         click (studio.noiseBtn);
-        pump (50);
-        CHECK (insp.isNoiseOn() == before, "and back again");
+        CHECK (waitFor ([&] { return ! insp.isBusy(); }, 60000), "noise removal finished");
+        pump (200);
+        const auto after = state().tracks.getReference (voiceIndex()).clips.getReference (0).file;
+        CHECK (after != filesBefore && after.getFileName().contains ("_clean") && after.existsAsFile(), "one click: the recording is replaced by a cleaned copy (" + after.getFileName() + ")");
+        click (tl.undoBtn);
+        CHECK (state().tracks.getReference (voiceIndex()).clips.getReference (0).file == filesBefore, "Ctrl+Z brings the original recording back");
+        click (studio.noiseBtn);
+        waitFor ([&] { return ! insp.isBusy(); }, 60000);
+        click (tl.undoBtn);
     }
 
     // ------------------------------------------------------------------ 9. presets
@@ -411,18 +416,17 @@ int UITest::run()
         CHECK (std::abs (state().musicTrack()->speed - 1.0) < 1e-6, "back to normal speed");
     }
 
-    // ------------------------------------------------------------------ 8. AI vocal remover
-    std::cout << "\n8. AI music / voice separation\n";
+    // ------------------------------------------------------------------ 8. key change (music higher / lower, speed kept)
+    std::cout << "\n8. Key change\n";
     {
-        juce::String why;
-        if (Separator::isAvailable (&why))
-        {
-            const auto before = state().musicTrack()->baseAudio;
-            click (ic.sepBtn);
-            CHECK (waitFor ([&] { return ! insp.isBusy(); }, 240000) && state().musicTrack()->baseAudio != before, "'কণ্ঠ সরিয়ে কারাওকে বানান' replaced the music with the vocal-free version");
-            click (tl.undoBtn);
-        }
-        else std::cout << "  SKIP  " << why << "\n";
+        const auto before = state().musicTrack()->clips.getReference (0).file;
+        click (ic.keyUp);
+        click (ic.keyUp);
+        click (ic.keyApply);
+        CHECK (waitFor ([&] { return ! insp.isBusy() && state().musicTrack()->semitones == 2; }, 120000), "music 2 steps higher");
+        CHECK (state().musicTrack()->clips.getReference (0).file != before && std::abs (state().musicTrack()->speed - 1.0) < 1e-6, "new audio, same speed");
+        click (tl.undoBtn);
+        CHECK (state().musicTrack()->semitones == 0, "undo brings the original key back");
     }
 
     // ------------------------------------------------------------------ 15. exports
@@ -519,7 +523,6 @@ int UITest::run()
         dev->extraNoise = 0.0f;
         mc->keyPressed (juce::KeyPress (juce::KeyPress::spaceKey));   // Space stops it
         CHECK (waitFor ([&] { return voiceIndex() >= 0 && ! state().tracks.getReference (voiceIndex()).clips.isEmpty(); }, 3000), "Space stops; the recording is on the voice layer");
-        insp.setNoiseOn (false);
         auto out = capture (0.2, 1200);
         CHECK (rms (out, 4800) > 0.001, "it plays back with effects");
         const int vi = voiceIndex();
