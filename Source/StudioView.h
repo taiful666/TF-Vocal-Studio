@@ -115,10 +115,6 @@ private:
              cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool },
              fromFile { juce::String::fromUTF8 ("ফাইল থেকে আনুন"), TFButton::Style::tool };
     std::unique_ptr<juce::FileChooser> chooser;
-    camera::Recorder camRec;
-    bool cameraOn = false;
-    juce::File pendingCamera;
-    TFButton camBtn { juce::String::fromUTF8 ("ক্যামেরা") };
     friend struct UITest;
 };
 
@@ -271,10 +267,17 @@ private:
     TapTiming tapView { engine };
 
     std::unique_ptr<juce::FileChooser> chooser;
-    camera::Recorder camRec;
+    camera::Session cam;
+    camera::Preview camPreview { cam };
     bool cameraOn = false;
     juce::File pendingCamera;
+    juce::String lastCameraName;
     TFButton camBtn { juce::String::fromUTF8 ("ক্যামেরা") };
+    void restartCamera (const juce::File& recordTo);
+    void startCameraRecording();
+    void cancelCameraRecording();
+    int cameraPoll = 0;
+    static juce::File cameraPreviewFile();
     float exportProgress = -1.0f;
     std::vector<ExportJob> exportQueue;
     juce::StringArray exportedFiles, exportErrors;
@@ -283,6 +286,8 @@ public:
     // camera (singers on video)
     void setCameraEnabled (bool on);
     bool isCameraEnabled() const { return cameraOn; }
+    /** For the automated test: a stand-in for the camera (ffmpeg input arguments). */
+    std::function<juce::StringArray (bool)> cameraInputOverride;
     bool revealAfterExport = true;
 private:
     bool wasPlaying = false, wasRecording = false;

@@ -639,6 +639,46 @@ int UITest::run()
         CHECK (Updater::sha256Of (f) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 check of the download");
     }
 
+    // ------------------------------------------------------------------ 19. camera: live picture, recorded with the voice
+    std::cout << "\n19. Camera\n";
+    if (media::ffmpeg().existsAsFile())
+    {
+        // a test picture stands in for the webcam (the same ffmpeg pipeline as a real DirectShow camera)
+        studio.cameraInputOverride = [] (bool) { return juce::StringArray { "-re", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30" }; };
+        studio.setCameraEnabled (true);
+        CHECK (waitFor ([&] { return studio.camPreview.isVisible() && studio.camPreview.hasPicture(); }, 8000), "camera on: the live picture shows on the stage and keeps updating");
+        const auto t1 = studio.cameraPreviewFile().getLastModificationTime();
+        pump (600);
+        CHECK (studio.cameraPreviewFile().getLastModificationTime() > t1, "the picture is live (not a single photo)");
+        snap (*mc, "camera-on");
+        tl.selectTrack (voiceId());
+        engine.setPosition (1.0);
+        pump (200);
+        click (studio.recBtn);
+        pump (300);
+        CHECK (engine.isRecording() && studio.cam.isRecording(), "record: the camera video is recorded together with the voice");
+        dev->extraNoise = 0.1f;
+        pump (3000);
+        dev->extraNoise = 0.0f;
+        std::cout << "        camera file while recording: " << studio.pendingCamera.getFullPathName() << " " << studio.pendingCamera.getSize() << " bytes\n";
+        click (studio.recBtn);
+        waitFor ([&] { return ! engine.isRecording(); }, 3000);
+        pump (500);
+        ClipInfo withCam;
+        for (auto& c : state().tracks.getReference (voiceIndex()).clips) if (c.camera != juce::File()) withCam = c;
+        CHECK (withCam.camera.existsAsFile() && withCam.camera.getSize() > 10000, "the camera video is kept with the recording (" + withCam.camera.getFileName() + ")");
+        CHECK (std::abs (withCam.cameraStart - withCam.start) < 2.0, "camera video placed at the recording's time (" + juce::String (withCam.cameraStart, 2) + " s vs " + juce::String (withCam.start, 2) + " s)");
+        auto pi = media::probe (withCam.camera);
+        CHECK (pi.hasVideo && pi.duration > 2.0, "the camera video plays (" + juce::String (pi.duration, 1) + " s)");
+        CHECK (waitFor ([&] { return studio.cam.isRunning() && ! studio.cam.isRecording(); }, 3000), "after recording the live picture continues");
+        double cs = 0.0;
+        CHECK (studio.cameraFor (state(), {}, cs) == withCam.camera, "the save window offers this camera video");
+        click (tl.undoBtn);
+        studio.setCameraEnabled (false);
+        CHECK (! studio.cam.isRunning() && ! studio.camPreview.isVisible(), "camera off: the camera is released");
+        studio.cameraInputOverride = nullptr;
+    }
+
     // ------------------------------------------------------------------ 15. exports
     std::cout << "\n15. Exports\n";
     {

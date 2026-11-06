@@ -568,7 +568,10 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     camBtn.onClick = [this] { setCameraEnabled (! cameraOn); };
     addChildComponent (camBtn);
     cameraOn = props.getBoolValue ("cameraOn", false) && props.getValue ("camera").isNotEmpty();
+    lastCameraName = props.getValue ("camera");
     camBtn.setSelected (cameraOn);
+    addChildComponent (camPreview);
+    if (cameraOn) restartCamera ({});
     noiseBtn.setRadius (12.0f);
     lyricsBtn.onClick = [this] { showLyricsPanel(); };
     noiseBtn.onClick = [this] { inspector.cleanVoice (Inspector::CleanKind::noise, recordTrack()); };
@@ -655,6 +658,7 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
 
 StudioView::~StudioView()
 {
+    cam.stop();
     importCancel = true;
     jobs.removeAllJobs (true, 10000);
     toast = nullptr;   // the owner may already be half destroyed
@@ -1005,9 +1009,18 @@ void StudioView::filesDropped (const juce::StringArray& files, int, int)
 //==============================================================================
 // Transport and recording
 //==============================================================================
+void StudioView::cancelCameraRecording()
+{
+    if (! cam.isRecording()) return;
+    cam.stop();
+    pendingCamera.deleteFile();
+    pendingCamera = juce::File();
+    restartCamera ({});
+}
+
 void StudioView::togglePlay()
 {
-    if (countIn.isCounting()) { countIn.cancel(); return; }
+    if (countIn.isCounting()) { countIn.cancel(); cancelCameraRecording(); return; }
     if (engine.isRecording()) { engine.stopRecording(); return; }
     if (! engine.hasContent()) { if (toast) toast (u8 ("আগে মিউজিক দিন বা রেকর্ড করুন")); return; }
     engine.togglePlay();
@@ -1028,10 +1041,11 @@ void StudioView::toggleRecord()
 {
     if (importing.load()) return;
     if (engine.isRecording()) { engine.stopRecording(); return; }
-    if (countIn.isCounting()) { countIn.cancel(); return; }
+    if (countIn.isCounting()) { countIn.cancel(); cancelCameraRecording(); return; }
     lyricsEditor.setVisible (false);
     if (props.getBoolValue ("countIn", true))
     {
+        startCameraRecording();
         countIn.toFront (false);
         juce::Component::SafePointer<StudioView> safe (this);
         countIn.start ([safe] { if (safe != nullptr) safe->startRecordingNow(); });
@@ -1040,10 +1054,28 @@ void StudioView::toggleRecord()
     startRecordingNow();
 }
 
+juce::File StudioView::cameraPreviewFile()
+{
+    return juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("TF Vocal Studio").getChildFile ("camera preview.jpg");
+}
+
+void StudioView::restartCamera (const juce::File& recordTo)
+{
+    if (! cameraOn) { cam.stop(); camPreview.setActive (false); return; }
+    const auto device = props.getValue ("camera");
+    auto input = cameraInputOverride ? cameraInputOverride
+                                     : std::function<juce::StringArray (bool)> ([device] (bool fixed) { return camera::dshowInput (device, fixed); });
+    auto e = cam.start (input, cameraPreviewFile(), recordTo);
+    if (e.isNotEmpty() && toast) toast (e);
+    camPreview.setActive (! stage.showingHome());
+    camPreview.toFront (false);
+    resized();
+}
+
 void StudioView::setCameraEnabled (bool on)
 {
-    if (engine.isRecording()) return;
-    if (on && props.getValue ("camera").isEmpty())
+    if (engine.isRecording() || countIn.isCounting()) return;
+    if (on && props.getValue ("camera").isEmpty() && ! cameraInputOverride)
     {
         if (toast) toast (u8 ("আগে \"অডিও সেটিংস → ডিভাইস\" থেকে ক্যামেরা বাছুন (ফোন হলে DroidCam / Iriun দিয়ে USB-তে যুক্ত করুন)"));
         if (onOpenSettings) onOpenSettings();
@@ -1052,7 +1084,17 @@ void StudioView::setCameraEnabled (bool on)
     cameraOn = on;
     props.setValue ("cameraOn", on);
     camBtn.setSelected (on);
-    if (toast) toast (on ? u8 ("ক্যামেরা চালু — রেকর্ডের সময় ভিডিও হবে") : u8 ("ক্যামেরা বন্ধ"));
+    restartCamera ({});
+    if (toast) toast (on ? u8 ("ক্যামেরা চালু — নিজেদের দেখতে পাবেন; রেকর্ড চাপলে ভিডিওও রেকর্ড হবে") : u8 ("ক্যামেরা বন্ধ"));
+}
+
+void StudioView::startCameraRecording()
+{
+    // the same camera process now also records the video (started early, during the count-in if any)
+    if (! cameraOn || cam.isRecording()) return;
+    pendingCamera = AudioEngine::recordingsFolder().getChildFile ("camera " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".ts").getNonexistentSibling();
+    restartCamera (pendingCamera);
+    if (! cam.isRecording()) pendingCamera = juce::File();
 }
 
 void StudioView::startRecordingNow()
@@ -1060,20 +1102,14 @@ void StudioView::startRecordingNow()
     if (engine.isRecording() || importing.load()) return;
     const auto id = recordTrack();
     engine.setArmedTrack (id);
-    pendingCamera = juce::File();
-    if (cameraOn && props.getValue ("camera").isNotEmpty())
-    {
-        auto f = AudioEngine::recordingsFolder().getChildFile ("camera " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".ts").getNonexistentSibling();
-        auto e = camRec.start (props.getValue ("camera"), f);
-        if (e.isEmpty()) pendingCamera = f;
-        else if (toast) toast (e);
-    }
+    startCameraRecording();
     juce::String err;
     if (! engine.startRecording (id, {}, err))
     {
-        camRec.stop();
+        cam.stop();
         pendingCamera.deleteFile();
         pendingCamera = juce::File();
+        restartCamera ({});
         showError (err);
     }
 }
@@ -1130,11 +1166,11 @@ void StudioView::consumeRecording()
     // a finished recording goes onto its track
     auto res = engine.takeLastRecording();
     if (res.wav == juce::File()) return;
-    juce::File cam;
+    juce::File camFile;
     double camStart = 0.0;
-    if (camRec.isRecording())
+    if (cam.isRecording())
     {
-        const double wall = camRec.stop();
+        const double wall = cam.stop();
         if (res.ok && ! res.punch && pendingCamera.existsAsFile() && pendingCamera.getSize() > 10000)
         {
             // the singer is seen at wall-clock time W singing the music heard at W: the music reached
@@ -1143,14 +1179,15 @@ void StudioView::consumeRecording()
             const double firstSample = res.start - (res.in - (double) engine.getRoundTripLatencySamples() / juce::jmax (1.0, engine.getSampleRate()));
             camStart = firstSample + (wall - audioStartWall) - engine.getRoundTripLatencyMs() / 2000.0
                        - 0.06 + props.getDoubleValue ("camOffsetMs", 0.0) / 1000.0;
-            cam = pendingCamera;
+            camFile = pendingCamera;
         }
         else pendingCamera.deleteFile();
         pendingCamera = juce::File();
+        restartCamera ({});   // back to the live picture
     }
     if (res.ok)
     {
-        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out, res.punch, res.speaker, cam, camStart);
+        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out, res.punch, res.speaker, camFile, camStart);
         if (toast) toast (u8 ("রেকর্ড হয়েছে — চালান চাপলে মিউজিকের সাথে শুনবেন"));
     }
     else if (toast) toast (u8 ("রেকর্ডিং খুব ছোট ছিল, রাখা হয়নি"));
@@ -1330,6 +1367,19 @@ void StudioView::timerCallback()
         updateTransportButtons();
     }
     if (stage.showingHome() == addBtn.isVisible()) updateToolbar();
+
+    // a camera chosen (or removed) in the settings switches the camera on (or off) right away
+    if (++cameraPoll >= 15)
+    {
+        cameraPoll = 0;
+        const auto name = props.getValue ("camera");
+        if (name != lastCameraName && ! engine.isRecording() && ! countIn.isCounting())
+        {
+            lastCameraName = name;
+            if (name.isNotEmpty()) { cameraOn = false; setCameraEnabled (true); }
+            else if (cameraOn) setCameraEnabled (false);
+        }
+    }
 }
 
 //==============================================================================
@@ -1480,7 +1530,8 @@ void StudioView::showExportPanel()
     o.escapeKeyTriggersCloseButton = true;
     o.useNativeTitleBar = true;
     o.resizable = false;
-    if (isShowing()) o.componentToCentreAround = this;
+    if (isShowing() && juce::Desktop::getInstance().getDisplays().getDisplayForRect (getScreenBounds()) != nullptr)
+        o.componentToCentreAround = this;
     auto* win = o.launchAsync();
     juce::Component::SafePointer<juce::DialogWindow> safeWin (win);
     juce::Component::SafePointer<StudioView> safe (this);
@@ -1795,6 +1846,12 @@ void StudioView::resized()
     lyricsEditor.setBounds (stageCard);
     overlay.setBounds (stageCard);
     countIn.setBounds (stageCard.reduced (2));
+    {
+        const int w = juce::jlimit (180, 280, (int) (stageCard.getWidth() * 0.22f)), h = w * 9 / 16;
+        camPreview.setBounds (stageCard.getRight() - w - 16, stageCard.getBottom() - h - 16, w, h);
+        const bool show = cameraOn && cam.isRunning() && ! home;
+        if (show != camPreview.isVisible()) camPreview.setActive (show);
+    }
     tapView.setBounds (stageCard.reduced (2));
 
     auto tr = transportCard.reduced (16, 10);
