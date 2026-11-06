@@ -59,6 +59,8 @@ namespace icons
     juce::Path check();
     juce::Path plus();
     juce::Path folder();
+    juce::Path home();
+    juce::Path refresh();
     juce::Path headphones();
     juce::Path music();
     juce::Path search();
@@ -180,6 +182,14 @@ private:
     void timerCallback() override;
     float knob = -1.0f;
 };
+
+//==============================================================================
+/** Gives the keyboard focus back to the main window (so Space, R, Delete always work). */
+inline void focusMainWindow (juce::Component* from)
+{
+    for (auto* c = from; c != nullptr; c = c->getParentComponent())
+        if (c->getWantsKeyboardFocus() && dynamic_cast<juce::Button*> (c) == nullptr) { c->grabKeyboardFocus(); return; }
+}
 
 //==============================================================================
 /** Rounded card background. */

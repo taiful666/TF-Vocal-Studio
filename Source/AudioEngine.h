@@ -163,7 +163,7 @@ public:
     bool punchFinished() const noexcept { return punchDone.load(); }
     double getRecordedSeconds() const noexcept;
     juce::String getRecordingTrack() const { return recordTrackId; }
-    struct RecordingResult { juce::String trackId; juce::File wav; double start = 0, in = 0, out = 0; bool ok = false; };
+    struct RecordingResult { juce::String trackId; juce::File wav; double start = 0, in = 0, out = 0; bool ok = false, punch = false; };
     RecordingResult takeLastRecording() { auto r = lastResult; lastResult = {}; return r; }
     const PeakTimeline& getLivePeaks() const noexcept { return vocalPeaks; }
 

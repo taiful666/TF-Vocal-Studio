@@ -69,6 +69,8 @@ namespace icons
     juce::Path check()        { return svg ("M20 6L9 17l-5-5"); }
     juce::Path plus()         { return svg ("M12 5v14 M5 12h14"); }
     juce::Path folder()       { return svg ("M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"); }
+    juce::Path home()         { return svg ("M3 10.5L12 3l9 7.5 M5 9v11h5v-6h4v6h5V9"); }
+    juce::Path refresh()      { return svg ("M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7"); }
     juce::Path headphones()   { return svg ("M3 18v-6a9 9 0 0 1 18 0v6 M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"); }
     juce::Path music()        { return svg ("M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"); }
     juce::Path search()       { return svg ("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M20 20l-3.5-3.5"); }
@@ -523,6 +525,7 @@ Knob::Knob (const juce::String& n, double min, double max, double def, std::func
     slider.setVelocityBasedMode (false);
     slider.setTitle (n);
     slider.setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    slider.setWantsKeyboardFocus (false);
     slider.onValueChange = [this] { repaint(); if (onChange) onChange (slider.getValue()); };
     addAndMakeVisible (slider);
 }
@@ -558,6 +561,7 @@ LabeledSlider::LabeledSlider (const juce::String& label, double min, double max,
     slider.setDoubleClickReturnValue (true, def);
     slider.setTitle (label);
     slider.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    slider.setWantsKeyboardFocus (false);
     slider.onValueChange = [this] { repaint(); if (onChange) onChange (slider.getValue()); };
     addAndMakeVisible (slider);
 }

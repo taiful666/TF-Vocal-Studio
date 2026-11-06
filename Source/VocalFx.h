@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
+#include <juce_data_structures/juce_data_structures.h>
 
 namespace tf
 {
@@ -148,7 +149,7 @@ private:
     bool tuneInPath = false;
     AutoTune tune;
     PlateReverb reverb;
-    Biquad deessHp, low, midPk, high, warmLp;
+    Biquad deLp1, deLp2, deHp1, deHp2, low, midPk, high, warmLp;
     float deessEnv = 0.0f, compEnv = 0.0f, makeup = 1.0f;
     std::vector<float> work, delayLine, echoL, echoR, revL, revR, dblL, dblR, tuneOut;
     int dlMask = 0, dlW = 0, echoMask = 0, echoW = 0;
@@ -172,4 +173,22 @@ struct Preset
     void applyTo (FxParams& p) const;
 };
 const std::vector<Preset>& builtInPresets();
+
+//==============================================================================
+/** "My presets": saved in the app settings, so they survive closing the software. */
+struct UserPreset { juce::String id, name, state; };
+class UserPresets
+{
+public:
+    explicit UserPresets (juce::PropertiesFile& p) : props (p) {}
+    juce::Array<UserPreset> list() const;
+    juce::String add (const juce::String& name, const juce::String& fxState);   // returns the new id
+    bool rename (const juce::String& id, const juce::String& newName);
+    bool remove (const juce::String& id);
+    const UserPreset* find (const juce::String& id, juce::Array<UserPreset>& storage) const;
+private:
+    void store (const juce::Array<UserPreset>&);
+    static juce::String clean (const juce::String& s) { return s.replaceCharacters ("\t\r\n", "   ").trim(); }
+    juce::PropertiesFile& props;
+};
 }

@@ -97,5 +97,6 @@ private:
     bool dragMoved = false;
     double lastPlayhead = -1.0;
     int lastLaneCount = -1;
+    friend struct UITest;
 };
 }

@@ -12,7 +12,8 @@ class MainComponent : public juce::Component,
                       private juce::Timer
 {
 public:
-    explicit MainComponent (juce::PropertiesFile& props);
+    /** configureDevices: lets the automated UI test add its simulated sound card before start-up. */
+    explicit MainComponent (juce::PropertiesFile& props, std::function<void (AudioEngine&)> configureDevices = {});
     ~MainComponent() override;
 
     void paint (juce::Graphics&) override;
@@ -42,7 +43,9 @@ private:
     TFButton studioTab { juce::String::fromUTF8 ("স্টুডিও"), TFButton::Style::segment },
              libraryTab { juce::String::fromUTF8 ("গানের লাইব্রেরি"), TFButton::Style::segment },
              settingsBtn { juce::String::fromUTF8 ("অডিও সেটিংস") },
-             liveBtn { juce::String::fromUTF8 ("লাইভ মাইক বন্ধ") };
+             liveBtn { juce::String::fromUTF8 ("লাইভ মাইক বন্ধ") },
+             homeBtn { juce::String::fromUTF8 ("হোম") },
+             resetBtn { juce::String::fromUTF8 ("নতুন শুরু") };
     juce::Rectangle<int> headerArea, tabWell, devicePill;
 
     StudioView studio { engine, props };
@@ -52,5 +55,6 @@ private:
     Smoother toastAnim;
     double toastUntil = 0;
     juce::String lastDeviceText;
+    friend struct UITest;
 };
 }

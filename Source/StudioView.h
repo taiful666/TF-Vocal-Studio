@@ -43,7 +43,13 @@ public:
     void changeFontSize (float delta);
     void changeSpeed (float delta);
     float getSpeed() const { return speed; }
+    float getFontSize() const { return fontSize; }
+    /** Lyrics timing: + = lyrics come later, − = earlier (seconds). */
+    void setOffset (double seconds);
+    double getOffset() const { return offset; }
     void resetScroll() { manualOffset = 0.0f; }
+    /** The karaoke line being sung now (-1 before the first), after the timing offset. */
+    int currentLine() const { return lyrics.indexAt (songTime() - offset); }
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -54,6 +60,10 @@ public:
     OptionCard addAudio, addVideo, pasteLyrics, singFree;
     TFButton openLibrary { juce::String::fromUTF8 ("লাইব্রেরি থেকে গান বাছুন"), TFButton::Style::ghost };
     TFButton writeLyrics { juce::String::fromUTF8 ("লিরিক্স লিখুন বা পেস্ট করুন"), TFButton::Style::accent };
+    TFButton backToProject { juce::String::fromUTF8 ("চলমান প্রজেক্টে ফিরুন"), TFButton::Style::tool };
+    TFButton newStart { juce::String::fromUTF8 ("নতুন প্রজেক্ট (রিসেট)"), TFButton::Style::ghost };
+    /** Shows the home options even when the project has content (Home button). */
+    void setForceHome (bool f);
 
 private:
     void tick();
@@ -71,17 +81,19 @@ private:
     Lyrics lyrics;
     VideoFrames video;
     Mode mode = Mode::lyrics;
-    bool home = false;
+    bool home = false, forceHome = false;
 
     float scrollIdx = 0.0f;
     float fontSize = 34.0f, speed = 1.0f;
     float manualOffset = 0.0f, dragStartOffset = 0.0f;
+    double offset = 0.0;
     juce::TextLayout layout;
     float layoutWidth = 0.0f, layoutFont = 0.0f;
     double lastTick = 0;
     juce::Image lastFrame;
     juce::Rectangle<int> homeTitle;
     juce::VBlankAttachment vblank { this, [this] { tick(); } };
+    friend struct UITest;
 };
 
 //==============================================================================
@@ -101,6 +113,7 @@ private:
              cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool },
              fromFile { juce::String::fromUTF8 ("ফাইল থেকে আনুন"), TFButton::Style::tool };
     std::unique_ptr<juce::FileChooser> chooser;
+    friend struct UITest;
 };
 
 //==============================================================================
@@ -135,7 +148,14 @@ public:
     /** From the library: sing this song (a new project unless the current one is still empty). */
     void openSong (const juce::File& f);
     void openProject (const juce::File& f);
+    /** The library deleted this project file: if it is open, start a fresh project without saving it back. */
+    void projectFileDeleted (const juce::File& f);
     void newProject();
+    /** Home button: the start options, from anywhere. */
+    void showHome();
+    /** Reset button: keep the current project in the library and start a fresh one. */
+    void resetProject();
+    bool projectHasContent() const;
     void togglePlay();
     void toggleRecord();
     void goToStart();
@@ -150,6 +170,7 @@ public:
     Project& getProject() { return project; }
 
     std::function<void()> onOpenLibrary;
+    friend struct UITest;
     std::function<void (const juce::String&)> toast;
 
     void paint (juce::Graphics&) override;
@@ -167,6 +188,12 @@ private:
     void showSaveMenu();
     void showAddMenu();
     void exportRange (juce::Range<double> range, bool mp3);
+    enum class ExportFormat { mp3, wav, mp4 };
+    struct ExportJob { ProjectState state; juce::Range<double> range; ExportFormat format; juce::String suffix; };
+    void exportChoice (int menuItem, juce::Range<double> selection);
+    void startExports (std::vector<ExportJob>);
+    void runNextExport();
+    void exportFinished();
     void showError (const juce::String& msg);
     void importAndAdd (const juce::File& f, bool copyToLibrary);
     void musicAdded (const juce::File& source, const juce::File& audio);
@@ -178,6 +205,8 @@ private:
     void startRedoPart (const juce::String& trackId, juce::Range<double> range);
     void singWithoutMusic();
     void consumeRecording();
+    void updateNoiseButton();
+    void showLyricsPanel();
 
     AudioEngine& engine;
     juce::PropertiesFile& props;
@@ -195,10 +224,9 @@ private:
     TFButton addBtn { juce::String::fromUTF8 ("যোগ করুন"), TFButton::Style::accent },
              viewVideo { juce::String::fromUTF8 ("ভিডিও"), TFButton::Style::segment },
              viewLyrics { juce::String::fromUTF8 ("লিরিক্স"), TFButton::Style::segment },
-             editLyricsBtn { juce::String::fromUTF8 ("লিরিক্স") },
-             fontDown { juce::String::fromUTF8 ("অ−") }, fontUp { juce::String::fromUTF8 ("অ+") },
-             slower { juce::String::fromUTF8 ("−") }, faster { "+" };
-    juce::Rectangle<int> viewWell, speedArea;
+             lyricsBtn { juce::String::fromUTF8 ("লিরিক্স") },
+             noiseBtn { juce::String::fromUTF8 ("নয়েজ রিমুভ") };
+    juce::Rectangle<int> viewWell;
 
     // transport
     TFButton toStartBtn { juce::String::fromUTF8 ("শুরুতে যান") }, stopBtn { juce::String::fromUTF8 ("থামান") },
@@ -209,6 +237,12 @@ private:
 
     std::unique_ptr<juce::FileChooser> chooser;
     float exportProgress = -1.0f;
+    std::vector<ExportJob> exportQueue;
+    juce::StringArray exportedFiles, exportErrors;
+public:
+    std::function<void()> onExportsDone;   // for the automated test
+    bool revealAfterExport = true;
+private:
     bool wasPlaying = false, wasRecording = false;
     juce::File stageSource;
     juce::String stageLyricsKey;

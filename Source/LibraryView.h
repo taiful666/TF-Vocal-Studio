@@ -20,6 +20,7 @@ public:
     std::function<void (const juce::File&)> onSing;
     std::function<void (const juce::File&)> onOpenProject;
     std::function<void()> onNewProject;
+    std::function<void (const juce::File&)> onProjectDeleted;
     std::function<void (const juce::String&)> toast;
 
     void refresh();
@@ -56,6 +57,9 @@ private:
     void chooseForSeparation();
     void setTab (bool recordings);
     void renameItem (const Item& it);
+    void deleteItem (const Item& it);
+    void deleteNow (const Item& it);
+    friend struct UITest;
     juce::String songName (const juce::File& f) const;
     juce::StringPairArray loadNames() const;
     void saveName (const juce::File& f, const juce::String& name);

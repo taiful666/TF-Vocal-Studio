@@ -7,13 +7,14 @@ namespace tf
 static juce::String u8 (const char* s) { return juce::String::fromUTF8 (s); }
 
 //==============================================================================
-MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
+MainComponent::MainComponent (juce::PropertiesFile& p, std::function<void (AudioEngine&)> configureDevices) : props (p)
 {
     setOpaque (true);
     setWantsKeyboardFocus (true);
 
     logo = juce::ImageCache::getFromMemory (TFData::icon256_png, TFData::icon256_pngSize);
 
+    if (configureDevices) configureDevices (engine);
     auto saved = props.getXmlValue ("audioDevice");
     engine.initialise (saved.get());
     applySavedAudioSettings (engine, props);
@@ -30,6 +31,14 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
     addAndMakeVisible (liveBtn);
     updateLiveButton();
 
+    homeBtn.setIcon (icons::home(), false, 17.0f);
+    homeBtn.setTooltip (u8 ("হোম — শুরুর পর্দায় যান (অডিও, ভিডিও, লিরিক্স, খালি গলায় গান)"));
+    homeBtn.onClick = [this] { showPage (0); studio.showHome(); };
+    resetBtn.setIcon (icons::refresh(), false, 16.0f);
+    resetBtn.setTooltip (u8 ("নতুন প্রজেক্ট শুরু করুন — এখনকারটা লাইব্রেরিতে সেভ থাকবে"));
+    resetBtn.onClick = [this] { showPage (0); studio.resetProject(); };
+    for (auto* b : { &homeBtn, &resetBtn }) { b->setRadius (10.0f); b->setFontSize (14.5f); addAndMakeVisible (b); }
+
     settingsBtn.setIcon (icons::gear(), false, 19.0f);
     settingsBtn.setTooltip (u8 ("মাইক, স্পিকার ও দেরি (latency) ঠিক করুন"));
     settingsBtn.onClick = [this] { showSettings(); };
@@ -43,7 +52,8 @@ MainComponent::MainComponent (juce::PropertiesFile& p) : props (p)
     studio.onOpenLibrary = [this] { showPage (1); };
     library.onSing = [this] (const juce::File& f) { showPage (0); studio.openSong (f); };
     library.onOpenProject = [this] (const juce::File& f) { showPage (0); studio.openProject (f); };
-    library.onNewProject = [this] { showPage (0); studio.newProject(); };
+    library.onNewProject = [this] { showPage (0); studio.resetProject(); };
+    library.onProjectDeleted = [this] (const juce::File& f) { studio.projectFileDeleted (f); };
 
     toastAnim.onChange = [this] { repaint (getLocalBounds().withHeight (140)); };
 
@@ -221,9 +231,15 @@ void MainComponent::resized()
     liveBtn.setBounds (h.removeFromRight (168).withSizeKeepingCentre (168, 44));
     h.removeFromRight (12);
 
-    // tabs centred when there is room, otherwise right after the logo
+    // home + new start right after the logo
+    auto left = headerArea.reduced (28, 0).withTrimmedLeft (230);
+    homeBtn.setBounds (left.removeFromLeft (96).withSizeKeepingCentre (96, 44));
+    left.removeFromLeft (8);
+    resetBtn.setBounds (left.removeFromLeft (128).withSizeKeepingCentre (128, 44));
+
+    // tabs centred when there is room, otherwise right after those
     const int wellW = 4 + 120 + 2 + 170 + 4;
-    const int logoEnd = h.getX() + 240;
+    const int logoEnd = resetBtn.getRight() + 16;
     int tabX = headerArea.getCentreX() - wellW / 2;
     const int pillMin = 170;
     if (tabX < logoEnd || tabX + wellW + 12 + pillMin > h.getRight()) tabX = logoEnd;

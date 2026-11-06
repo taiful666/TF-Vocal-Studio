@@ -256,7 +256,7 @@ public:
           inS ((juce::int64) std::llround (c.in * r->sampleRate)),
           lenS ((juce::int64) std::llround (c.length() * r->sampleRate)),
           ahead (readAheadSamples),
-          fade (juce::jmax ((juce::int64) 1, (juce::int64) (0.005 * r->sampleRate))) {}
+          fade (juce::jmax ((juce::int64) 1, (juce::int64) std::llround (clipFadeSeconds * r->sampleRate))) {}
 
     void prepareToPlay (int, double) override {}
     void releaseResources() override {}
@@ -614,7 +614,8 @@ bool AudioEngine::startRecording (const juce::String& trackId, juce::Range<doubl
         for (auto& tr : tracks) if (tr->id == trackId) recordTrack = tr.get();
         punchDone = false;
         // the take reaches the end of the part only once the latency has passed as well
-        punchEndSample = punch.isEmpty() ? -1 : (juce::int64) std::llround (punch.getEnd() * t.sampleRate) + t.vocalOffset;
+        // (+ a little more, so the new part can cross-fade into the old take after it)
+        punchEndSample = punch.isEmpty() ? -1 : (juce::int64) std::llround ((punch.getEnd() + 0.03) * t.sampleRate) + t.vocalOffset;
         loopOn = false;
         recording = true;
         playing = true;
@@ -654,6 +655,7 @@ void AudioEngine::stopRecording()
         r.out = t.lengthSeconds;                       // file seconds (includes the latency head)
         if (! punchRange.isEmpty())
         {
+            r.punch = true;
             const double end = r.start + (r.out - r.in);
             const double a = juce::jmax (r.start, punchRange.getStart());
             const double b = juce::jmin (end, punchRange.getEnd());
@@ -740,7 +742,7 @@ void AudioEngine::exportMix (const ProjectState& p, const juce::File& dest, juce
                 const int destStart = (int) std::llround ((a - t0) * sr);
                 const int n = juce::jmin (dry.getNumSamples() - destStart, (int) std::llround ((b - a) * sr));
                 juce::AudioBuffer<float> tmp (dry.getNumChannels(), 8192);
-                const int fade = (int) (0.005 * sr);
+                const double fade = std::round (clipFadeSeconds * sr);
                 for (int pos = 0; pos < n; pos += 8192)
                 {
                     const int m = juce::jmin (8192, n - pos);

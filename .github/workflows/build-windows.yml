@@ -85,6 +85,15 @@ jobs:
           & "$t\TFEngineTest.exe"
           if ($LASTEXITCODE -ne 0) { throw "Engine test failed" }
 
+      - name: Run UI test (every button, record -> play -> export, home/library)
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $t = "build\TFUITest_artefacts\Release"
+          Copy-Item -Recurse -Force bundle\* $t\
+          & "$t\TFUITest.exe"
+          if ($LASTEXITCODE -ne 0) { throw "UI test failed - no Setup.exe will be made" }
+
       - name: Work out version
         id: ver
         shell: pwsh

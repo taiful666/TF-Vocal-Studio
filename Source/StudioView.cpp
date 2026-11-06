@@ -1,4 +1,5 @@
 #include "StudioView.h"
+#include "VideoExport.h"
 
 namespace tf
 {
@@ -21,6 +22,7 @@ OptionCard::OptionCard (const juce::String& t, const juce::String& s, juce::Path
     setTooltip (s);
     setMouseCursor (juce::MouseCursor::PointingHandCursor);
     setWantsKeyboardFocus (true);
+    setMouseClickGrabsKeyboardFocus (false);
 }
 
 void OptionCard::paintButton (juce::Graphics& g, bool over, bool down)
@@ -62,7 +64,9 @@ LyricsView::LyricsView (AudioEngine& e, Project& p, juce::PropertiesFile& pr)
     speed = (float) props.getDoubleValue ("tpSpeed", 1.0);
     openLibrary.setIcon (icons::folder(), false, 16.0f);
     writeLyrics.setIcon (icons::plus(), false, 18.0f);
-    for (auto* b : { &openLibrary, &writeLyrics }) { b->setRadius (12.0f); addChildComponent (b); }
+    backToProject.setIcon (icons::chevronRight(), false, 14.0f);
+    newStart.setIcon (icons::plus(), false, 15.0f);
+    for (auto* b : { &openLibrary, &writeLyrics, &backToProject, &newStart }) { b->setRadius (12.0f); addChildComponent (b); }
     for (auto* c : { &addAudio, &addVideo, &pasteLyrics, &singFree }) addChildComponent (c);
 }
 
@@ -76,7 +80,7 @@ double LyricsView::songTime() const
 void LyricsView::setLyrics (Lyrics l)
 {
     lyrics = std::move (l);
-    scrollIdx = (float) juce::jmax (0, lyrics.indexAt (songTime()));
+    scrollIdx = (float) juce::jmax (0, lyrics.indexAt (songTime() - offset));
     manualOffset = 0.0f;
     layoutWidth = 0.0f;
     updateHome();
@@ -107,6 +111,20 @@ float LyricsView::pixelsPerSecond() const
     return speed * juce::jmax (6.0f, (float) (h / len));
 }
 
+void LyricsView::setForceHome (bool f)
+{
+    forceHome = f;
+    updateHome();
+    resized();
+    repaint();
+}
+
+void LyricsView::setOffset (double seconds)
+{
+    offset = juce::jlimit (-30.0, 30.0, seconds);
+    repaint();
+}
+
 void LyricsView::changeSpeed (float d)
 {
     const float pos = (float) engine.getPosition();
@@ -120,12 +138,15 @@ void LyricsView::changeSpeed (float d)
 void LyricsView::updateHome()
 {
     const bool hasMusic = project.state().musicTrack() != nullptr;
-    const bool h = ! video.isOpen() && lyrics.isEmpty() && ! engine.isRecording() && ! hasMusic;
-    const bool needWrite = hasMusic && lyrics.isEmpty() && ! (mode == Mode::video && video.isOpen());
-    if (h != home || writeLyrics.isVisible() != needWrite)
+    if (engine.isRecording()) forceHome = false;
+    const bool h = forceHome || (! video.isOpen() && lyrics.isEmpty() && ! engine.isRecording() && ! hasMusic);
+    const bool needWrite = ! h && hasMusic && lyrics.isEmpty() && ! (mode == Mode::video && video.isOpen());
+    const bool back = h && forceHome && (hasMusic || ! lyrics.isEmpty() || project.state().length() > 0.0);
+    if (h != home || writeLyrics.isVisible() != needWrite || backToProject.isVisible() != back)
     {
         home = h;
-        for (auto* c : std::initializer_list<juce::Component*> { &addAudio, &addVideo, &pasteLyrics, &singFree, &openLibrary }) c->setVisible (h);
+        for (auto* c : std::initializer_list<juce::Component*> { &addAudio, &addVideo, &pasteLyrics, &singFree, &openLibrary, &newStart }) c->setVisible (h);
+        backToProject.setVisible (back);
         writeLyrics.setVisible (needWrite);
         resized();
         repaint();
@@ -149,7 +170,15 @@ void LyricsView::resized()
     pasteLyrics.setBounds (row2.removeFromLeft (cw));
     singFree.setBounds (row2.removeFromRight (cw));
     area.removeFromTop (16);
-    openLibrary.setBounds (area.removeFromTop (40).withSizeKeepingCentre (240, 40));
+    {
+        auto row = area.removeFromTop (40);
+        const int bw = 230, rowW = bw * (backToProject.isVisible() ? 3 : 2) + 12 * (backToProject.isVisible() ? 2 : 1);
+        auto r = row.withSizeKeepingCentre (rowW, 40);
+        if (backToProject.isVisible()) { backToProject.setBounds (r.removeFromLeft (bw)); r.removeFromLeft (12); }
+        openLibrary.setBounds (r.removeFromLeft (bw));
+        r.removeFromLeft (12);
+        newStart.setBounds (r.removeFromLeft (bw));
+    }
 
     auto c = getLocalBounds().getCentre();
     writeLyrics.setBounds (juce::Rectangle<int> (280, 50).withCentre ({ c.x, c.y + 50 }));
@@ -175,7 +204,7 @@ void LyricsView::tick()
 
     if (lyrics.timed)
     {
-        const float target = (float) juce::jmax (0, lyrics.indexAt (st));
+        const float target = (float) juce::jmax (0, lyrics.indexAt (st - offset));
         const float before = scrollIdx;
         scrollIdx += (target - scrollIdx) * (1.0f - std::exp (-dt * 9.0f));
         if (std::abs (target - scrollIdx) < 0.0005f) scrollIdx = target;
@@ -192,7 +221,7 @@ void LyricsView::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheel
     repaint();
 }
 
-void LyricsView::mouseDown (const juce::MouseEvent&) { dragStartOffset = manualOffset; }
+void LyricsView::mouseDown (const juce::MouseEvent&) { focusMainWindow (this); dragStartOffset = manualOffset; }
 
 void LyricsView::mouseDrag (const juce::MouseEvent& e)
 {
@@ -227,7 +256,7 @@ void LyricsView::drawLine (juce::Graphics& g, const juce::String& text, float ce
 
 void LyricsView::paintKaraoke (juce::Graphics& g, juce::Rectangle<float> b)
 {
-    const double st = songTime();
+    const double st = songTime() - offset;
     const float cy = b.getCentreY();
     const int sungIdx = lyrics.indexAt (st);
     const int current = juce::jmax (0, sungIdx);
@@ -285,7 +314,7 @@ void LyricsView::paintTeleprompter (juce::Graphics& g, juce::Rectangle<float> b)
 {
     rebuildLayout();
     const float readY = b.getY() + b.getHeight() * 0.36f;
-    const float auto_ = (float) engine.getPosition() * pixelsPerSecond();
+    const float auto_ = (float) (engine.getPosition() - offset) * pixelsPerSecond();
     manualOffset = juce::jlimit (-b.getHeight() * 0.3f - auto_, layout.getHeight() - fontSize - auto_, manualOffset);
     const float scroll = manualOffset + auto_;
 
@@ -311,12 +340,6 @@ void LyricsView::paintTeleprompter (juce::Graphics& g, juce::Rectangle<float> b)
     fade (b.getY(), b.getY() + 60.0f, true);
     fade (b.getBottom() - 70.0f, b.getBottom(), false);
 
-    if (! engine.isPlaying())
-    {
-        g.setColour (col::dim);
-        g.setFont (font (13.0f));
-        g.drawText (u8 ("মাউস চাকা বা টেনে উপর-নিচ করুন  ·  চালালে নিজে থেকে স্ক্রল হবে"), b.removeFromBottom (26), juce::Justification::centred);
-    }
 }
 
 void LyricsView::paint (juce::Graphics& g)
@@ -328,8 +351,8 @@ void LyricsView::paint (juce::Graphics& g)
         auto t = homeTitle.toFloat();
         g.setColour (col::ink);
         g.setFont (font (25.0f, Weight::semibold));
-        const bool hasVoice = project.state().length() > 0.0;
-        g.drawText (hasVoice ? u8 ("আরও কিছু যোগ করবেন?") : u8 ("কী দিয়ে শুরু করবেন?"), t.removeFromTop (40), juce::Justification::centred);
+        const bool hasVoice = project.state().length() > 0.0 || project.state().musicTrack() != nullptr;
+        g.drawText (hasVoice ? u8 ("এই প্রজেক্টে কী যোগ করবেন?") : u8 ("কী দিয়ে শুরু করবেন?"), t.removeFromTop (40), juce::Justification::centred);
         g.setColour (col::muted);
         g.setFont (font (14.5f));
         g.drawText (u8 ("যেকোনো ফাইল এখানে টেনে এনেও ছাড়তে পারেন — অডিও, ভিডিও বা লিরিক্স (.txt / .lrc)"), t.removeFromTop (26), juce::Justification::centred);
@@ -522,26 +545,20 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     addBtn.setIcon (icons::plus(), false, 16.0f);
     addBtn.setTooltip (u8 ("অডিও, লিরিক্স ভিডিও বা লিরিক্স যোগ করুন"));
     for (auto* b : { &viewVideo, &viewLyrics }) { b->setFontSize (14.0f); addChildComponent (b); }
-    editLyricsBtn.setIcon (icons::plus(), false, 16.0f);
-    editLyricsBtn.setTooltip (u8 ("লিরিক্স লিখুন, পেস্ট করুন বা বদলান"));
-    fontDown.setTooltip (u8 ("লেখা ছোট করুন"));
-    fontUp.setTooltip (u8 ("লেখা বড় করুন"));
-    slower.setTooltip (u8 ("স্ক্রল ধীরে"));
-    faster.setTooltip (u8 ("স্ক্রল দ্রুত"));
-    for (auto* b : { &addBtn, &editLyricsBtn, &fontDown, &fontUp, &slower, &faster })
+    lyricsBtn.setIcon (icons::gear(), false, 16.0f);
+    lyricsBtn.setTooltip (u8 ("লিরিক্সের লেখার আকার, স্ক্রলের গতি, সময় মেলানো, লিরিক্স বদলানো"));
+    noiseBtn.setIcon (icons::sparkle(), false, 16.0f);
+    noiseBtn.setTooltip (u8 ("এক চাপে AI নয়েজ রিমুভ চালু/বন্ধ — ফ্যান, এসি, রাস্তার শব্দ সরায়"));
+    for (auto* b : { &addBtn, &lyricsBtn, &noiseBtn })
     {
         b->setRadius (9.0f);
         b->setFontSize (14.0f);
         addChildComponent (b);
     }
-    for (auto* b : { &fontDown, &fontUp, &slower, &faster }) b->setFontSize (18.0f);
-    viewVideo.onClick = [this] { stage.setMode (LyricsView::Mode::video); updateToolbar(); };
-    viewLyrics.onClick = [this] { stage.setMode (LyricsView::Mode::lyrics); updateToolbar(); };
-    editLyricsBtn.onClick = [this] { openLyricsEditor(); };
-    fontDown.onClick = [this] { stage.changeFontSize (-3.0f); };
-    fontUp.onClick = [this] { stage.changeFontSize (3.0f); };
-    slower.onClick = [this] { stage.changeSpeed (-0.1f); repaint (speedArea); };
-    faster.onClick = [this] { stage.changeSpeed (0.1f); repaint (speedArea); };
+    noiseBtn.setVisible (true);
+    noiseBtn.setRadius (12.0f);
+    lyricsBtn.onClick = [this] { showLyricsPanel(); };
+    noiseBtn.onClick = [this] { inspector.setNoiseOn (! inspector.isNoiseOn()); updateNoiseButton(); if (toast) toast (inspector.isNoiseOn() ? u8 ("AI নয়েজ রিমুভ চালু") : u8 ("AI নয়েজ রিমুভ বন্ধ")); };
     addBtn.onClick = [this] { showAddMenu(); };
 
     toStartBtn.onClick = [this] { goToStart(); };
@@ -551,15 +568,17 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     saveBtn.onClick = [this] { showSaveMenu(); };
 
     // home options
-    stage.addAudio.onClick = [this] { chooseFile (false); };
-    stage.addVideo.onClick = [this] { chooseFile (true); };
-    stage.pasteLyrics.onClick = [this] { openLyricsEditor(); };
-    stage.singFree.onClick = [this] { singWithoutMusic(); };
-    stage.openLibrary.onClick = [this] { if (onOpenLibrary) onOpenLibrary(); };
+    stage.addAudio.onClick = [this] { stage.setForceHome (false); chooseFile (false); };
+    stage.addVideo.onClick = [this] { stage.setForceHome (false); chooseFile (true); };
+    stage.pasteLyrics.onClick = [this] { stage.setForceHome (false); openLyricsEditor(); };
+    stage.singFree.onClick = [this] { stage.setForceHome (false); singWithoutMusic(); };
+    stage.openLibrary.onClick = [this] { stage.setForceHome (false); if (onOpenLibrary) onOpenLibrary(); };
+    stage.backToProject.onClick = [this] { stage.setForceHome (false); updateToolbar(); };
+    stage.newStart.onClick = [this] { resetProject(); };
     stage.writeLyrics.onClick = [this] { openLyricsEditor(); };
 
     lyricsEditor.onSave = [this] (const juce::String& t) { saveLyrics (t); };
-    lyricsEditor.onCancel = [this] { lyricsEditor.setVisible (false); };
+    lyricsEditor.onCancel = [this] { lyricsEditor.setVisible (false); focusMainWindow (this); };
     addChildComponent (lyricsEditor);
 
     overlay.onCancel = [this] { importCancel = true; };
@@ -573,10 +592,12 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
             engine.setArmedTrack (id);
     };
     timeline.onRedoPart = [this] (const juce::String& id, juce::Range<double> r) { startRedoPart (id, r); };
-    timeline.onExportPart = [this] (juce::Range<double> r) { exportRange (r, false); };
+    timeline.onExportPart = [this] (juce::Range<double> r) { exportRange (r, true); };
     timeline.toast = [this] (const juce::String& t) { if (toast) toast (t); };
     inspector.toast = [this] (const juce::String& t) { if (toast) toast (t); };
     inspector.onChangeMusic = [this] { showAddMenu(); };
+    inspector.onNoiseChanged = [this] { updateNoiseButton(); };
+    updateNoiseButton();
 
     project.addChangeListener (this);
     engine.addChangeListener (this);
@@ -667,6 +688,7 @@ void StudioView::reloadStage()
         stageLyricsKey = key;
         lyrics = Lyrics::loadFromFile (lf);
         stage.setLyrics (lyrics);
+        stage.setOffset (props.getDoubleValue ("lyrOffset|" + lf.getFullPathName(), 0.0));
     }
     updateToolbar();
 }
@@ -679,12 +701,53 @@ void StudioView::openProject (const juce::File& f)
     timeline.zoomToFit();
 }
 
+void StudioView::projectFileDeleted (const juce::File& f)
+{
+    if (project.getFile() != f) return;
+    engine.stop();
+    consumeRecording();
+    project.discard();
+    project.newProject (u8 ("নতুন প্রজেক্ট"));
+    timeline.zoomToFit();
+}
+
+void StudioView::showHome()
+{
+    lyricsEditor.setVisible (false);
+    stage.setForceHome (true);
+    updateToolbar();
+}
+
+bool StudioView::projectHasContent() const
+{
+    return project.state().length() > 0.0 || project.state().musicTrack() != nullptr || ! lyrics.isEmpty();
+}
+
+void StudioView::resetProject()
+{
+    if (importing.load()) return;
+    if (engine.isRecording()) stopAndKeep();
+    if (! projectHasContent()) { newProject(); return; }
+    juce::Component::SafePointer<StudioView> safe (this);
+    juce::AlertWindow::showAsync (juce::MessageBoxOptions().withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                      .withTitle (u8 ("নতুন করে শুরু করবেন?"))
+                                      .withMessage (u8 ("এখনকার কাজ \"") + project.state().name + u8 ("\" নামে লাইব্রেরির \"আমার প্রজেক্ট\"-এ সেভ থাকবে। যেকোনো সময় সেখান থেকে খুলতে পারবেন।"))
+                                      .withButton (u8 ("নতুন শুরু করুন"), 1).withButton (u8 ("বাতিল"), 0)
+                                      .withAssociatedComponent (this),
+                                  [safe] (int r) { if (safe != nullptr && r == 1) safe->newProject(); });
+}
+
 void StudioView::newProject()
 {
     if (engine.isRecording() || importing.load()) return;
     engine.stop();
+    consumeRecording();
+    if (projectHasContent()) project.saveNow();
     project.newProject (u8 ("নতুন প্রজেক্ট"));
+    stage.setForceHome (false);
+    lyricsEditor.setVisible (false);
     timeline.zoomToFit();
+    if (toast) toast (u8 ("নতুন প্রজেক্ট — আগেরটা লাইব্রেরিতে সেভ আছে"));
 }
 
 void StudioView::openSong (const juce::File& f)
@@ -874,6 +937,7 @@ void StudioView::saveLyrics (const juce::String& text)
     reloadStage();
     stage.setMode (LyricsView::Mode::lyrics);
     lyricsEditor.setVisible (false);
+    focusMainWindow (this);
     updateToolbar();
     resized();
     if (toast) toast (text.trim().isEmpty() ? u8 ("লিরিক্স সরানো হয়েছে") : u8 ("লিরিক্স সেভ হয়েছে"));
@@ -985,7 +1049,7 @@ void StudioView::consumeRecording()
     if (res.wav == juce::File()) return;
     if (res.ok)
     {
-        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out);
+        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out, res.punch);
         if (toast) toast (u8 ("রেকর্ড হয়েছে — চালান চাপলে মিউজিকের সাথে শুনবেন"));
     }
     else if (toast) toast (u8 ("রেকর্ডিং খুব ছোট ছিল, রাখা হয়নি"));
@@ -996,6 +1060,99 @@ void StudioView::stopAndKeep()
     engine.stop();
     consumeRecording();
     project.saveNow();
+}
+
+void StudioView::updateNoiseButton()
+{
+    const bool on = inspector.isNoiseOn();
+    noiseBtn.setSelected (on);
+    noiseBtn.setText (on ? u8 ("নয়েজ রিমুভ চালু") : u8 ("নয়েজ রিমুভ বন্ধ"));
+}
+
+//==============================================================================
+/** Small panel for the lyrics display: size, scroll speed, timing, edit. */
+class LyricsPanel : public juce::Component
+{
+public:
+    struct StepRow : public juce::Component
+    {
+        StepRow (const juce::String& l, std::function<juce::String()> v, std::function<void (int)> step) : label (l), value (std::move (v)), onStep (std::move (step))
+        {
+            for (auto* b : { &minus, &plus }) { b->setRadius (9.0f); b->setFontSize (18.0f); addAndMakeVisible (b); }
+            minus.onClick = [this] { onStep (-1); repaint(); };
+            plus.onClick  = [this] { onStep (+1); repaint(); };
+        }
+        void resized() override
+        {
+            auto r = getLocalBounds();
+            plus.setBounds (r.removeFromRight (38).withSizeKeepingCentre (38, 34));
+            r.removeFromRight (6);
+            valueArea = r.removeFromRight (84);
+            r.removeFromRight (6);
+            minus.setBounds (r.removeFromRight (38).withSizeKeepingCentre (38, 34));
+        }
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (col::inkSoft); g.setFont (font (14.5f));
+            g.drawText (label, getLocalBounds().withRight (minus.getX() - 6), juce::Justification::centredLeft, true);
+            g.setColour (col::ink); g.setFont (font (14.5f, Weight::semibold));
+            g.drawText (value(), valueArea, juce::Justification::centred);
+        }
+        juce::String label;
+        std::function<juce::String()> value;
+        std::function<void (int)> onStep;
+        TFButton minus { juce::String (juce::CharPointer_UTF8 ("\xe2\x88\x92")) }, plus { "+" };
+        juce::Rectangle<int> valueArea;
+    };
+
+    LyricsPanel (LyricsView& v, std::function<void (double)> offsetChanged, std::function<void()> edit)
+        : stage (v),
+          size (u8 ("লেখার আকার"), [&v] { return bn ((int) std::round (v.getFontSize())); }, [&v] (int d) { v.changeFontSize (3.0f * (float) d); }),
+          speed (u8 ("স্ক্রলের গতি"), [&v] { return bn (juce::String (v.getSpeed(), 1)) + "x"; }, [&v] (int d) { v.changeSpeed (0.1f * (float) d); }),
+          sync (u8 ("সময় মেলানো"), [&v] { const double o = v.getOffset(); return (o > 0.001 ? "+" : "") + bn (juce::String (o, 2)) + u8 (" সে"); },
+                [&v, offsetChanged] (int d) { v.setOffset (v.getOffset() + 0.25 * d); if (offsetChanged) offsetChanged (v.getOffset()); })
+    {
+        addAndMakeVisible (size);
+        addAndMakeVisible (speed);
+        addAndMakeVisible (sync);
+        speed.setVisible (v.isTeleprompter());
+        editBtn.setRadius (10.0f);
+        editBtn.setIcon (icons::plus(), false, 16.0f);
+        editBtn.onClick = [this, edit]
+        {
+            if (auto* box = findParentComponentOfClass<juce::CallOutBox>()) box->dismiss();
+            if (edit) juce::MessageManager::callAsync (edit);
+        };
+        addAndMakeVisible (editBtn);
+        setSize (360, 20 + 46 * (speed.isVisible() ? 3 : 2) + 26 + 44 + 18);
+    }
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (18, 14);
+        size.setBounds (r.removeFromTop (46));
+        if (speed.isVisible()) speed.setBounds (r.removeFromTop (46));
+        sync.setBounds (r.removeFromTop (46));
+        hint = r.removeFromTop (26);
+        editBtn.setBounds (r.removeFromTop (44));
+    }
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (col::muted); g.setFont (font (12.5f));
+        g.drawText (u8 ("লেখা আগে এলে + চাপুন, পরে এলে − চাপুন"), hint, juce::Justification::centredLeft, true);
+    }
+    LyricsView& stage;
+    StepRow size, speed, sync;
+    TFButton editBtn { u8 ("লিরিক্স লিখুন / বদলান") };
+    juce::Rectangle<int> hint;
+};
+
+void StudioView::showLyricsPanel()
+{
+    juce::Component::SafePointer<StudioView> safe (this);
+    auto panel = std::make_unique<LyricsPanel> (stage,
+        [safe] (double o) { if (safe != nullptr) safe->props.setValue ("lyrOffset|" + safe->lyricsFile().getFullPathName(), o); },
+        [safe] { if (safe != nullptr) safe->openLyricsEditor(); });
+    juce::CallOutBox::launchAsynchronously (std::move (panel), getLocalArea (&lyricsBtn, lyricsBtn.getLocalBounds()), this);
 }
 
 void StudioView::updateTransportButtons()
@@ -1015,18 +1172,12 @@ void StudioView::updateToolbar()
 {
     const bool home = stage.showingHome();
     const bool video = stage.hasVideo();
-    const bool showingLyrics = ! video || stage.getMode() == LyricsView::Mode::lyrics;
     addBtn.setVisible (! home);
     viewVideo.setVisible (! home && video);
     viewLyrics.setVisible (! home && video);
     viewVideo.setSelected (video && stage.getMode() == LyricsView::Mode::video);
     viewLyrics.setSelected (! viewVideo.isSelected());
-    editLyricsBtn.setVisible (! home);
-    editLyricsBtn.setText (stage.hasLyrics() ? u8 ("লিরিক্স বদলান") : u8 ("লিরিক্স লিখুন"));
-    fontDown.setVisible (! home && showingLyrics && stage.hasLyrics());
-    fontUp.setVisible (fontDown.isVisible());
-    slower.setVisible (! home && showingLyrics && stage.isTeleprompter());
-    faster.setVisible (slower.isVisible());
+    lyricsBtn.setVisible (! home);
     resized();
     repaint();
 }
@@ -1058,56 +1209,140 @@ void StudioView::showSaveMenu()
 {
     if (! engine.hasContent()) { if (toast) toast (u8 ("আগে কিছু রেকর্ড করুন")); return; }
     const auto sel = timeline.getSelection();
+    const bool hasMusic = project.state().musicTrack() != nullptr;
     juce::PopupMenu m;
-    m.addSectionHeader (u8 ("মিউজিক + সব কণ্ঠ, ইফেক্টসহ"));
-    m.addItem (1, u8 ("পুরোটা MP3 হিসেবে সেভ করুন (ফেসবুক/ইউটিউবের জন্য)"));
-    m.addItem (2, u8 ("পুরোটা WAV হিসেবে সেভ করুন (সবচেয়ে ভালো মান)"));
-    m.addItem (3, u8 ("শুধু বাছাই করা অংশ MP3"), ! sel.isEmpty());
+    m.addSectionHeader (u8 ("ভলিউম, মিউট আর ইফেক্ট যেমন সেট করা, তেমনই থাকবে"));
+    m.addItem (1, u8 ("ভিডিও (MP4) — লিরিক্স বা গানের ভিডিওসহ"));
+    m.addItem (2, u8 ("পুরো গান MP3 (মিউজিক + কণ্ঠ)"));
+    m.addItem (3, u8 ("শুধু কণ্ঠ MP3"));
+    m.addItem (4, u8 ("শুধু মিউজিক MP3"), hasMusic);
+    m.addItem (5, u8 ("কণ্ঠ আর মিউজিক আলাদা দুই ফাইলে (MP3)"), hasMusic);
+    m.addItem (6, u8 ("পুরো গান WAV (সবচেয়ে ভালো মান)"));
     m.addSeparator();
-    m.addItem (4, u8 ("সেভ করা ফাইলের ফোল্ডার খুলুন"));
+    m.addItem (7, u8 ("শুধু বাছাই করা অংশ MP3"), ! sel.isEmpty());
+    m.addItem (8, u8 ("সেভ করা ফাইলের ফোল্ডার খুলুন"));
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (saveBtn).withMinimumWidth (saveBtn.getWidth()),
                      [this, sel] (int r)
     {
-        if (r == 1) exportRange ({}, true);
-        if (r == 2) exportRange ({}, false);
-        if (r == 3) exportRange (sel, true);
-        if (r == 4) { auto f = AudioEngine::appFolder().getChildFile ("Exports"); f.createDirectory(); f.revealToUser(); }
+        if (r == 8) { auto f = AudioEngine::appFolder().getChildFile ("Exports"); f.createDirectory(); f.revealToUser(); return; }
+        if (r >= 1 && r <= 7) exportChoice (r, sel);
     });
+}
+
+void StudioView::exportChoice (int choice, juce::Range<double> sel)
+{
+    const auto& st = project.state();
+    std::vector<ExportJob> jobsList;
+    auto job = [] (ProjectState s, juce::Range<double> r, ExportFormat f, const juce::String& suffix) { return ExportJob { std::move (s), r, f, suffix }; };
+    switch (choice)
+    {
+        case 1: jobsList.push_back (job (st, {}, ExportFormat::mp4, {})); break;
+        case 2: jobsList.push_back (job (st, {}, ExportFormat::mp3, {})); break;
+        case 3: jobsList.push_back (job (withOnly (st, TrackKind::vocal), {}, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)"))); break;
+        case 4: jobsList.push_back (job (withOnly (st, TrackKind::music), {}, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"))); break;
+        case 5: jobsList.push_back (job (withOnly (st, TrackKind::vocal), {}, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)")));
+                jobsList.push_back (job (withOnly (st, TrackKind::music), {}, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"))); break;
+        case 6: jobsList.push_back (job (st, {}, ExportFormat::wav, {})); break;
+        case 7: jobsList.push_back (job (st, sel, ExportFormat::mp3, u8 (" (অংশ)"))); break;
+        default: return;
+    }
+    startExports (std::move (jobsList));
 }
 
 void StudioView::exportRange (juce::Range<double> range, bool mp3)
 {
-    if (engine.isExporting() || exportProgress >= 0.0f || engine.isRecording()) return;
-    auto folder = AudioEngine::appFolder().getChildFile ("Exports");
-    folder.createDirectory();
-    auto name = juce::File::createLegalFileName (project.state().name.isNotEmpty() ? project.state().name : juce::String ("TF Vocal"));
-    if (! range.isEmpty()) name << u8 (" (অংশ)");
-    auto wav = folder.getChildFile (name + " - " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M") + ".wav").getNonexistentSibling();
+    startExports ({ ExportJob { project.state(), range, mp3 ? ExportFormat::mp3 : ExportFormat::wav, range.isEmpty() ? juce::String() : u8 (" (অংশ)") } });
+}
+
+void StudioView::startExports (std::vector<ExportJob> list)
+{
+    if (engine.isExporting() || exportProgress >= 0.0f || engine.isRecording() || list.empty()) return;
+    exportQueue = std::move (list);
+    exportedFiles.clear();
+    exportErrors.clear();
     exportProgress = 0.0f;
     updateTransportButtons();
+    resized();
+    runNextExport();
+}
+
+void StudioView::exportFinished()
+{
+    exportProgress = -1.0f;
+    saveBtn.setText (u8 ("সেভ / এক্সপোর্ট"));
+    updateTransportButtons();
+    resized();
+    if (exportErrors.isEmpty())
+    {
+        if (toast) toast (exportedFiles.size() > 1 ? bn (exportedFiles.size()) + u8 ("টি ফাইল সেভ হয়েছে") : u8 ("সেভ হয়েছে — ফোল্ডার খোলা হলো"));
+        if (revealAfterExport && ! exportedFiles.isEmpty()) juce::File (exportedFiles[exportedFiles.size() - 1]).revealToUser();
+    }
+    else showError (exportErrors.joinIntoString ("\n"));
+    if (onExportsDone) onExportsDone();
+}
+
+void StudioView::runNextExport()
+{
+    if (exportQueue.empty()) { exportFinished(); return; }
+    auto job = exportQueue.front();
+    exportQueue.erase (exportQueue.begin());
+
+    auto folder = AudioEngine::appFolder().getChildFile ("Exports");
+    folder.createDirectory();
+    auto name = juce::File::createLegalFileName ((project.state().name.isNotEmpty() ? project.state().name : juce::String ("TF Vocal")) + job.suffix);
+    auto wav = folder.getChildFile (name + " - " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M") + ".wav").getNonexistentSibling();
+    const auto label = job.format == ExportFormat::mp4 ? u8 ("ভিডিও") : u8 ("সেভ");
     juce::Component::SafePointer<StudioView> safe (this);
-    engine.exportMix (project.state(), wav, range,
-        [safe] (float p) { if (safe != nullptr) { safe->exportProgress = p; safe->saveBtn.setText (u8 ("সেভ হচ্ছে… ") + bn ((int) (p * 100)) + "%"); } },
-        [safe, mp3, wav] (bool ok, juce::String msg)
+
+    // what the video needs, taken now (on the message thread)
+    videoexport::Options vo;
+    vo.state = job.state;
+    vo.lyrics = lyrics;
+    vo.lyricsOffset = stage.getOffset();
+    vo.scrollSpeed = stage.getSpeed();
+    vo.title = project.state().name;
+    vo.rangeStart = job.range.isEmpty() ? 0.0 : job.range.getStart();
+    vo.useSourceVideo = ! stage.hasVideo() || stage.getMode() == LyricsView::Mode::video;
+
+    engine.exportMix (job.state, wav, job.range,
+        [safe, label] (float p) { if (safe != nullptr) { safe->exportProgress = p; safe->saveBtn.setText (label + u8 (" হচ্ছে… ") + bn ((int) (p * (label == u8 ("ভিডিও") ? 30 : 100))) + "%"); } },
+        [safe, job, wav, vo] (bool ok, juce::String msg) mutable
         {
             if (safe == nullptr) return;
-            auto finish = [safe] (bool ok2, const juce::String& m2)
+            if (! ok) { safe->exportErrors.add (msg); safe->runNextExport(); return; }
+            if (job.format == ExportFormat::wav) { safe->exportedFiles.add (wav.getFullPathName()); safe->runNextExport(); return; }
+
+            safe->saveBtn.setText (job.format == ExportFormat::mp4 ? u8 ("ভিডিও তৈরি হচ্ছে…") : u8 ("MP3 তৈরি হচ্ছে…"));
+            safe->jobs.addJob ([safe, job, wav, vo]() mutable
             {
-                if (safe == nullptr) return;
-                safe->exportProgress = -1.0f;
-                safe->saveBtn.setText (u8 ("সেভ / এক্সপোর্ট"));
-                safe->updateTransportButtons();
-                if (ok2) { if (safe->toast) safe->toast (u8 ("সেভ হয়েছে — ফোল্ডার খোলা হলো")); juce::File (m2).revealToUser(); }
-                else safe->showError (m2);
-            };
-            if (! ok || ! mp3) { finish (ok, msg); return; }
-            safe->saveBtn.setText (u8 ("MP3 তৈরি হচ্ছে…"));
-            safe->jobs.addJob ([safe, wav, finish]
-            {
-                auto mp3File = wav.withFileExtension (".mp3");
-                auto err = media::encodeMp3 (wav, mp3File);
+                juce::String err;
+                juce::File out;
+                if (job.format == ExportFormat::mp3)
+                {
+                    out = wav.withFileExtension (".mp3");
+                    err = media::encodeMp3 (wav, out);
+                }
+                else
+                {
+                    out = wav.withFileExtension (".mp4");
+                    juce::AudioFormatManager fm; fm.registerBasicFormats();
+                    if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (wav) }) vo.length = (double) r->lengthInSamples / r->sampleRate;
+                    vo.mixWav = wav;
+                    vo.out = out;
+                    std::atomic<bool> never { false };
+                    err = videoexport::render (vo, [safe] (float p)
+                    {
+                        juce::MessageManager::callAsync ([safe, p] { if (safe != nullptr) safe->saveBtn.setText (u8 ("ভিডিও তৈরি হচ্ছে… ") + bn (30 + (int) (p * 70)) + "%"); });
+                    }, safe != nullptr ? safe->importCancel : never);
+                }
                 if (err.isEmpty()) wav.deleteFile();
-                juce::MessageManager::callAsync ([finish, err, mp3File, wav] { if (err.isEmpty()) finish (true, mp3File.getFullPathName()); else finish (false, err + u8 ("\nWAV ফাইলটি রাখা হয়েছে: ") + wav.getFullPathName()); });
+                juce::MessageManager::callAsync ([safe, err, out, wav]
+                {
+                    if (safe == nullptr) return;
+                    if (err.isEmpty()) safe->exportedFiles.add (out.getFullPathName());
+                    else safe->exportErrors.add (err + u8 ("\nWAV ফাইলটি রাখা হয়েছে: ") + wav.getFullPathName());
+                    safe->runNextExport();
+                });
             });
         });
 }
@@ -1144,12 +1379,6 @@ void StudioView::paint (juce::Graphics& g)
         g.fillRoundedRectangle (viewWell.toFloat(), 10.0f);
         g.setColour (col::border);
         g.drawRoundedRectangle (viewWell.toFloat().reduced (0.5f), 10.0f, 1.0f);
-    }
-    if (slower.isVisible())
-    {
-        g.setColour (col::muted);
-        g.setFont (font (13.5f));
-        g.drawText (u8 ("স্ক্রল ") + bn (juce::String (stage.getSpeed(), 1)) + "x", speedArea, juce::Justification::centred);
     }
 
     // time
@@ -1194,16 +1423,7 @@ void StudioView::resized()
         tools.removeFromRight (8);
     };
     place (addBtn, 120);
-    place (editLyricsBtn, 136);
-    if (slower.isVisible())
-    {
-        place (faster, 38);
-        speedArea = tools.removeFromRight (70).withSizeKeepingCentre (70, 38);
-        place (slower, 38);
-        tools.removeFromRight (4);
-    }
-    place (fontUp, 42);
-    place (fontDown, 42);
+    place (lyricsBtn, 120);
     if (viewVideo.isVisible())
     {
         viewWell = tools.removeFromRight (180).withSizeKeepingCentre (180, 40);
@@ -1222,7 +1442,9 @@ void StudioView::resized()
     timeArea = tr.removeFromLeft (200);
     saveBtn.setBounds (tr.removeFromRight (exportProgress >= 0 ? 190 : 176).withSizeKeepingCentre (exportProgress >= 0 ? 190 : 176, 44));
     tr.removeFromRight (16);
-    meterArea = tr.removeFromRight (150).withSizeKeepingCentre (150, 26);
+    meterArea = tr.removeFromRight (130).withSizeKeepingCentre (130, 26);
+    tr.removeFromRight (14);
+    noiseBtn.setBounds (tr.removeFromRight (168).withSizeKeepingCentre (168, 44));
     masterL.setBounds (meterArea.withTrimmedLeft (14).withHeight (8));
     masterR.setBounds (meterArea.withTrimmedLeft (14).withTrimmedTop (18).withHeight (8));
 

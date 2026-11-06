@@ -189,7 +189,10 @@ void showAudioSettings (juce::Component* centreAround, AudioEngine& e, juce::Pro
     o.escapeKeyTriggersCloseButton = true;
     o.useNativeTitleBar = true;
     o.resizable = false;
-    o.componentToCentreAround = centreAround;
+    // centre on the main window when the system knows its screen (it always does on Windows)
+    if (centreAround != nullptr && centreAround->isShowing()
+        && juce::Desktop::getInstance().getDisplays().getDisplayForRect (centreAround->getScreenBounds()) != nullptr)
+        o.componentToCentreAround = centreAround;
     o.launchAsync();
 }
 }

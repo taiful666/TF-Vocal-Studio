@@ -100,6 +100,11 @@ public:
 
     std::function<void (const juce::String&)> toast;
     std::function<void()> onChangeMusic;
+    std::function<void()> onNoiseChanged;
+
+    /** AI noise removal for the microphone (shared by all voice tracks). */
+    void setNoiseOn (bool on);
+    bool isNoiseOn() const;
 
     void resized() override;
     void paint (juce::Graphics&) override;
@@ -124,6 +129,7 @@ private:
     void selectPreset (const juce::String& id);
     void saveUserPreset();
     void deleteUserPreset();
+    void renameUserPreset();
     juce::String presetSummary() const;
 
     // music jobs
@@ -150,5 +156,6 @@ private:
     std::atomic<bool> busy { false }, cancel { false };
 
     friend class Content;
+    friend struct UITest;
 };
 }

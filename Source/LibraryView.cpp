@@ -10,7 +10,7 @@ struct Cols { juce::Rectangle<int> name, kind, lyr, dur, act; };
 static Cols layoutCols (juce::Rectangle<int> r)
 {
     Cols c;
-    c.act = r.removeFromRight (170);
+    c.act = r.removeFromRight (214);
     r.removeFromRight (12);
     c.dur = r.removeFromRight (90);
     r.removeFromRight (12);
@@ -33,8 +33,13 @@ public:
         folder.setIcon (icons::folder(), false, 17.0f);
         folder.getProperties().set ("iconOnly", true);
         folder.setTooltip (u8 ("ফোল্ডারে দেখুন"));
+        trash.setIcon (icons::trash(), false, 17.0f);
+        trash.getProperties().set ("iconOnly", true);
+        trash.setTooltip (u8 ("মুছে ফেলুন"));
+        trash.onClick = [this] { if (auto* it = item()) owner.deleteItem (*it); };
         addAndMakeVisible (action);
         addAndMakeVisible (folder);
+        addAndMakeVisible (trash);
         action.onClick = [this] { activate(); };
         folder.onClick = [this]
         {
@@ -59,6 +64,8 @@ public:
     {
         auto c = layoutCols (getLocalBounds().reduced (20, 0));
         auto a = c.act;
+        trash.setBounds (a.removeFromRight (40).withSizeKeepingCentre (40, 40));
+        a.removeFromRight (4);
         folder.setBounds (a.removeFromRight (40).withSizeKeepingCentre (40, 40));
         a.removeFromRight (8);
         action.setBounds (a.removeFromRight (110).withSizeKeepingCentre (110, 40));
@@ -97,7 +104,7 @@ public:
 private:
     LibraryView& owner;
     int row = -1;
-    TFButton action { u8 ("গাইব"), TFButton::Style::tool }, folder { u8 ("ফোল্ডার"), TFButton::Style::ghost };
+    TFButton action { u8 ("গাইব"), TFButton::Style::tool }, folder { u8 ("ফোল্ডার"), TFButton::Style::ghost }, trash { u8 ("মুছুন"), TFButton::Style::ghost };
 };
 
 //==============================================================================
@@ -384,29 +391,7 @@ void LibraryView::showRowMenu (int row)
         if (r == 2) it.file.revealToUser();
         if (r == 5) renameItem (it);
         if (r == 4) separate (it.file);
-        if (r == 3)
-        {
-            juce::Component::SafePointer<LibraryView> safe (this);
-            juce::AlertWindow::showAsync (juce::MessageBoxOptions()
-                                              .withIconType (juce::MessageBoxIconType::QuestionIcon)
-                                              .withTitle (u8 ("মুছে ফেলবেন?"))
-                                              .withMessage (u8 ("\"") + it.name + u8 ("\" রিসাইকেল বিনে চলে যাবে। পরে চাইলে সেখান থেকে ফেরত আনতে পারবেন।"))
-                                              .withButton (u8 ("মুছে ফেলুন"), 1)
-                                              .withButton (u8 ("বাতিল"), 0)
-                                              .withAssociatedComponent (this),
-                                          [safe, it] (int result)
-            {
-                if (result != 1 || safe == nullptr) return;
-                if (it.isTake) it.file.moveToTrash();
-                else
-                {
-                    it.file.moveToTrash();
-                    auto lf = Lyrics::findFor (it.file);
-                    if (lf.existsAsFile()) lf.moveToTrash();
-                }
-                safe->refresh();
-            });
-        }
+        if (r == 3) deleteItem (it);
     });
 }
 
@@ -455,6 +440,33 @@ void LibraryView::renameItem (const Item& it)
         else safe->saveName (it.file, n);   // song files are never renamed: projects point to them
         safe->refresh();
     }), true);
+}
+
+void LibraryView::deleteItem (const Item& it)
+{
+    juce::Component::SafePointer<LibraryView> safe (this);
+    juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                      .withIconType (juce::MessageBoxIconType::QuestionIcon)
+                                      .withTitle (u8 ("মুছে ফেলবেন?"))
+                                      .withMessage (u8 ("\"") + it.name + u8 ("\" রিসাইকেল বিনে চলে যাবে। পরে চাইলে সেখান থেকে ফেরত আনতে পারবেন।"))
+                                      .withButton (u8 ("মুছে ফেলুন"), 1)
+                                      .withButton (u8 ("বাতিল"), 0)
+                                      .withAssociatedComponent (this),
+                                  [safe, it] (int result)
+    {
+        if (result != 1 || safe == nullptr) return;
+        safe->deleteNow (it);
+    });
+}
+
+void LibraryView::deleteNow (const Item& it)
+{
+    if (it.isTake && onProjectDeleted) onProjectDeleted (it.file);   // the open project must not save itself back
+    auto lf = Lyrics::findFor (it.file);
+    it.file.moveToTrash();
+    if (lf.existsAsFile()) lf.moveToTrash();
+    refresh();
+    if (toast) toast (u8 ("মুছে ফেলা হয়েছে"));
 }
 
 void LibraryView::resized()

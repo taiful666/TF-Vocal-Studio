@@ -83,6 +83,7 @@ public:
         volume.setRange (0.0, 1.5, 0.0);
         volume.setDoubleClickReturnValue (true, t.kind == TrackKind::music ? 0.65 : 1.0);
         volume.setTitle (u8 ("ভলিউম"));
+        volume.setWantsKeyboardFocus (false);
         volume.onDragStart = [this] { owner.project.beginGesture(); };
         volume.onDragEnd = [this] { owner.project.endGesture(); };
         volume.onValueChange = [this]
@@ -148,13 +149,12 @@ public:
         auto volArea = getLocalBounds().reduced (12, 8).withTrimmedTop (32).removeFromTop (20);
         g.setColour (col::muted);
         g.setFont (font (12.0f));
-        const auto db = juce::Decibels::gainToDecibels ((float) volume.getValue(), -60.0f);
-        g.drawText (db <= -59.0f ? juce::String (juce::CharPointer_UTF8 ("-\xe2\x88\x9e")) : bn (juce::String (db, 1)) + " dB",
-                    volArea.removeFromRight (50), juce::Justification::centredRight);
+        g.drawText (bn ((int) std::round (volume.getValue() * 100.0)) + "%", volArea.removeFromRight (50), juce::Justification::centredRight);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        focusMainWindow (this);
         owner.selectTrack (id);
         if (e.mods.isPopupMenu()) showMenu();
     }
@@ -608,6 +608,7 @@ void TimelineView::mouseMove (const juce::MouseEvent& e)
 
 void TimelineView::mouseDown (const juce::MouseEvent& e)
 {
+    focusMainWindow (this);
     dragMoved = false;
     drag = Drag::none;
     if (rulerArea.contains (e.getPosition()))

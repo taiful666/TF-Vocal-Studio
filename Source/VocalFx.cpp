@@ -405,7 +405,8 @@ void VocalChain::prepare (double sampleRate, int maxBlock, bool tuneAlwaysInPath
     s = 1; while (s < (int) (0.7 * sr)) s <<= 1;
     echoL.assign ((size_t) s, 0.0f); echoR.assign ((size_t) s, 0.0f); echoMask = s - 1; echoW = 0;
 
-    deessHp.setHighPass (sr, 5500.0, 0.707);
+    deLp1.setLowPass (sr, 5500.0, 0.7071); deLp2.setLowPass (sr, 5500.0, 0.7071);
+    deHp1.setHighPass (sr, 5500.0, 0.7071); deHp2.setHighPass (sr, 5500.0, 0.7071);
     warmLp.setLowPass (sr, 9000.0, 0.707);
     echoLpL.setLowPass (sr, 4200.0, 0.707); echoLpR.setLowPass (sr, 4200.0, 0.707);
     echoHpL.setHighPass (sr, 220.0, 0.707); echoHpR.setHighPass (sr, 220.0, 0.707);
@@ -418,7 +419,7 @@ void VocalChain::reset()
 {
     tune.reset();
     reverb.reset();
-    for (auto* b : { &deessHp, &low, &midPk, &high, &warmLp, &echoLpL, &echoLpR, &echoHpL, &echoHpR }) b->reset();
+    for (auto* b : { &deLp1, &deLp2, &deHp1, &deHp2, &low, &midPk, &high, &warmLp, &echoLpL, &echoLpR, &echoHpL, &echoHpR }) b->reset();
     std::fill (delayLine.begin(), delayLine.end(), 0.0f);
     std::fill (echoL.begin(), echoL.end(), 0.0f);
     std::fill (echoR.begin(), echoR.end(), 0.0f);
@@ -461,7 +462,8 @@ void VocalChain::process (const float* in, float* outL, float* outR, int n, bool
         return;
     }
 
-    // ---- de-esser (only the 5.5 kHz+ band is turned down while "s"/"sh" is loud)
+    // ---- de-esser: split at 5.5 kHz (Linkwitz-Riley, the two bands add back to the full voice),
+    //      and only the upper band is turned down while an "s"/"sh" is loud
     if (params.isOn (FxParams::deessOn))
     {
         const float d = params.get (FxParams::deess) / 100.0f;
@@ -469,12 +471,13 @@ void VocalChain::process (const float* in, float* outL, float* outR, int n, bool
         const float thr = 0.035f;
         for (int i = 0; i < n; ++i)
         {
-            const float h = deessHp.process (x[i]);
-            const float a = std::abs (h);
+            const float lo = deLp2.process (deLp1.process (x[i]));
+            const float hi = deHp2.process (deHp1.process (x[i]));
+            const float a = std::abs (hi);
             deessEnv += (a > deessEnv ? att : rel) * (a - deessEnv);
             float g = 1.0f;
             if (deessEnv > thr) g = std::pow (thr / deessEnv, d * 0.85f);
-            x[i] = x[i] - h + h * g;
+            x[i] = lo + hi * g;
         }
     }
 
@@ -490,7 +493,7 @@ void VocalChain::process (const float* in, float* outL, float* outR, int n, bool
     {
         const float body = params.get (FxParams::body) / 100.0f, warm = params.get (FxParams::warm) / 100.0f;
         const float thrDb = -12.0f - body * 22.0f, ratio = 2.0f + body * 4.0f;
-        const float mk = juce::Decibels::decibelsToGain (-thrDb * (1.0f - 1.0f / ratio) * 0.45f);
+        const float mk = juce::Decibels::decibelsToGain (-thrDb * (1.0f - 1.0f / ratio) * 0.35f);
         const float att = 1.0f - std::exp (-1.0f / (0.004f * (float) sr)), rel = 1.0f - std::exp (-1.0f / (0.09f * (float) sr));
         drive.setTargetValue (1.0f + warm * 5.0f);
         const float satMix = warm * 0.7f;
@@ -508,6 +511,9 @@ void VocalChain::process (const float* in, float* outL, float* outR, int n, bool
                 const float s = warmLp.process (std::tanh (dr * y) / dr);
                 y = y + satMix * (s - y);
             }
+            // soft ceiling: loud attacks that slip past the compressor are rounded off, never clipped
+            const float ay = std::abs (y);
+            if (ay > 0.8f) y = std::copysign (0.8f + 0.18f * std::tanh ((ay - 0.8f) / 0.18f), y);
             x[i] = y;
         }
     }
@@ -702,5 +708,55 @@ const std::vector<Preset>& builtInPresets()
         return v;
     }();
     return list;
+}
+
+//==============================================================================
+juce::Array<UserPreset> UserPresets::list() const
+{
+    juce::Array<UserPreset> out;
+    for (auto line : juce::StringArray::fromLines (props.getValue ("userPresets")))
+    {
+        auto parts = juce::StringArray::fromTokens (line, "\t", "");
+        if (parts.size() == 3 && parts[0].isNotEmpty()) out.add ({ parts[0], parts[1], parts[2] });
+    }
+    return out;
+}
+
+void UserPresets::store (const juce::Array<UserPreset>& l)
+{
+    juce::StringArray lines;
+    for (auto& p : l) lines.add (p.id + "\t" + clean (p.name) + "\t" + p.state);
+    props.setValue ("userPresets", lines.joinIntoString ("\n"));
+    props.saveIfNeeded();
+}
+
+juce::String UserPresets::add (const juce::String& name, const juce::String& fxState)
+{
+    auto l = list();
+    auto id = "user-" + juce::String (juce::Time::currentTimeMillis()) + "-" + juce::String (juce::Random::getSystemRandom().nextInt (100000));
+    l.add ({ id, clean (name), fxState });
+    store (l);
+    return id;
+}
+
+bool UserPresets::rename (const juce::String& id, const juce::String& newName)
+{
+    auto l = list();
+    for (auto& p : l) if (p.id == id && clean (newName).isNotEmpty()) { p.name = clean (newName); store (l); return true; }
+    return false;
+}
+
+bool UserPresets::remove (const juce::String& id)
+{
+    auto l = list();
+    for (int i = 0; i < l.size(); ++i) if (l.getReference (i).id == id) { l.remove (i); store (l); return true; }
+    return false;
+}
+
+const UserPreset* UserPresets::find (const juce::String& id, juce::Array<UserPreset>& storage) const
+{
+    storage = list();
+    for (auto& p : storage) if (p.id == id) return &p;
+    return nullptr;
 }
 }

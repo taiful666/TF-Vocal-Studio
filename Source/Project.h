@@ -20,6 +20,10 @@ struct ClipInfo
 
 enum class TrackKind { music, vocal };
 
+/** Every clip fades in and out over this time (no clicks); a re-sung part overlaps its neighbours by
+    the same time, so the old and the new take cross-fade smoothly. */
+constexpr double clipFadeSeconds = 0.010;
+
 struct TrackInfo
 {
     juce::String id, name;
@@ -67,13 +71,16 @@ public:
     void newProject (const juce::String& name);
     bool open (const juce::File& f);
     void saveNow();
+    /** Forget the open project without writing it again (its file was deleted). */
+    void discard() { stopTimer(); dirty = false; file = juce::File(); }
 
     // ---- edits (each one is undoable)
     juce::String addMusic (const juce::File& source, const juce::File& audio, double durationSeconds);
     juce::String addVocalTrack (const juce::String& name = {});
     void removeTrack (const juce::String& trackId);
     /** Places a recording; anything already on that track in the same time range is replaced. */
-    void insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out);
+    /** crossfade: the new part overlaps the old take on both sides (a re-sung part; the file has audio around it). */
+    void insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade = false);
     void deleteRange (const juce::String& trackId, juce::Range<double> range);
     void moveClip (const juce::String& trackId, const juce::String& clipId, double newStart);
     void setTrack (const TrackInfo& t, bool undoable = true);
@@ -102,6 +109,10 @@ private:
     bool inGesture = false, gestureSaved = false;
     bool dirty = false;
 };
+
+/** The project with only one kind of track audible (for "only voice" / "only music" exports).
+    Volumes, mutes and effects stay exactly as set. */
+ProjectState withOnly (const ProjectState&, TrackKind);
 
 juce::String projectToXml (const ProjectState&);
 bool projectFromXml (const juce::String&, ProjectState&);

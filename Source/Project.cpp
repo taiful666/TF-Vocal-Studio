@@ -291,15 +291,18 @@ void Project::removeRangeFromClips (juce::Array<ClipInfo>& clips, juce::Range<do
     clips = out;
 }
 
-void Project::insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out)
+void Project::insertRecording (const juce::String& trackId, const juce::File& wav, double start, double in, double out, bool crossfade)
 {
     const int i = st.indexOf (trackId);
     if (i < 0 || out - in <= 0.01) return;
     pushUndo();
     auto t = st.tracks.getReference (i);
-    removeRangeFromClips (t.clips, { start, start + (out - in) }, st);
+    const double end = start + (out - in);
+    const double h = crossfade && (out - in) > 4 * clipFadeSeconds && in >= clipFadeSeconds ? clipFadeSeconds * 0.5 : 0.0;
+    // the old take keeps h seconds inside the new part on each side; the new part reaches h outside it
+    removeRangeFromClips (t.clips, { start + h, end - h }, st);
     ClipInfo c;
-    c.id = newId ("c"); c.file = wav; c.start = start; c.in = in; c.out = out;
+    c.id = newId ("c"); c.file = wav; c.start = start - h; c.in = in - h; c.out = out + h;
     t.clips.add (c);
     st.tracks.set (i, t);
     changed();
@@ -364,5 +367,18 @@ void Project::replaceMusicAudio (const juce::String& trackId, const juce::File& 
     if (newBase != juce::File()) t.baseAudio = newBase;
     st.tracks.set (i, t);
     changed();
+}
+
+ProjectState withOnly (const ProjectState& s, TrackKind k)
+{
+    auto r = s;
+    bool soloInKind = false;
+    for (auto& t : r.tracks) if (t.kind == k && t.solo) soloInKind = true;
+    for (auto& t : r.tracks)
+    {
+        if (t.kind != k) { t.mute = true; t.solo = false; }
+        else if (! soloInKind) t.solo = false;
+    }
+    return r;
 }
 }
