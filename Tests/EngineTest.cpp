@@ -1321,6 +1321,24 @@ int main()
 
     testMedia (tmp, song);
 
+    // projects from v1.0 switch to the untouched microphone recording (their treated copy sounded harsh)
+    std::cout << "\nOld projects (v1.0) upgraded\n";
+    {
+        auto d = tmp.getChildFile ("old take");
+        d.createDirectory();
+        auto mk = [&] (const juce::File& f) { std::vector<float> x (48000, 0.1f); mixtools::writeMono (f, x, 48000.0); };
+        mk (d.getChildFile ("vocal.wav")); mk (d.getChildFile ("vocal_raw.wav"));
+        d.getChildFile ("session.xml").replaceWithText (R"(<TFVocalTake version="1" start="0" sampleRate="48000" vocalOffset="980" rawOffset="500" length="1"/>)");
+        ProjectState ps;
+        TrackInfo t; t.id = "v"; t.kind = TrackKind::vocal;
+        ClipInfo c; c.id = "c"; c.file = d.getChildFile ("vocal.wav"); c.start = 2.0; c.in = 980.0 / 48000.0; c.out = 0.9;
+        t.clips.add (c); ps.tracks.add (t);
+        const bool changed = migrateOldRecordings (ps);
+        const auto& m = ps.tracks.getReference (0).clips.getReference (0);
+        CHECK (changed && m.file.getFileName() == "vocal_raw.wav" && std::abs (m.in * 48000.0 - 500.0) < 0.01 && std::abs ((m.out - m.in) - (c.out - c.in)) < 1e-9 && m.start == 2.0,
+               "old voice clips now play the untouched recording, at the same place");
+    }
+
     // remove this run's recordings and project files
     for (auto& d : AudioEngine::recordingsFolder().findChildFiles (juce::File::findDirectories, false))
         if (d.getCreationTime() > juce::Time::getCurrentTime() - juce::RelativeTime::minutes (10) && d.getChildFile ("session.xml").existsAsFile()

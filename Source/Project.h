@@ -144,5 +144,7 @@ private:
 ProjectState withOnly (const ProjectState&, TrackKind);
 
 juce::String projectToXml (const ProjectState&);
+/** Projects from v1.0: points their voice clips at the untouched microphone recording. Returns true if changed. */
+bool migrateOldRecordings (ProjectState&);
 bool projectFromXml (const juce::String&, ProjectState&);
 }

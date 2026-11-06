@@ -165,15 +165,43 @@ void Project::newProject (const juce::String& name)
     sendChangeMessage();
 }
 
+bool migrateOldRecordings (ProjectState& s)
+{
+    // v1.0 saved its noise-treated voice as vocal.wav (with a timing fault that made it sound hollow and
+    // harsh) and the untouched microphone as vocal_raw.wav. Use the untouched one, at the right place.
+    bool changed = false;
+    for (auto& t : s.tracks)
+    {
+        if (t.kind != TrackKind::vocal) continue;
+        for (auto& c : t.clips)
+        {
+            if (c.file.getFileName() != "vocal.wav") continue;
+            auto raw = c.file.getSiblingFile ("vocal_raw.wav");
+            auto xml = juce::XmlDocument::parse (c.file.getSiblingFile ("session.xml"));
+            if (! raw.existsAsFile() || xml == nullptr || ! xml->hasAttribute ("rawOffset")) continue;
+            const double sr = xml->getDoubleAttribute ("sampleRate", 48000.0);
+            const double shift = (xml->getDoubleAttribute ("vocalOffset") - xml->getDoubleAttribute ("rawOffset")) / juce::jmax (1.0, sr);
+            if (shift < 0.0 || shift > 0.1 || c.in - shift < 0.0) continue;
+            c.file = raw;
+            c.in -= shift;
+            c.out -= shift;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 bool Project::open (const juce::File& f)
 {
     ProjectState s;
     if (! projectFromXml (f.loadFileAsString(), s)) return false;
     if (dirty) saveNow();
+    const bool upgraded = migrateOldRecordings (s);
     st = s;
     file = f;
     undoStack.clear(); redoStack.clear();
-    dirty = false;
+    dirty = upgraded;
+    if (upgraded) startTimer (1500);
     sendChangeMessage();
     return true;
 }
