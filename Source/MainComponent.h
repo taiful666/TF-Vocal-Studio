@@ -4,6 +4,7 @@
 #include "AudioEngine.h"
 #include "StudioView.h"
 #include "LibraryView.h"
+#include "Updater.h"
 
 namespace tf
 {
@@ -34,6 +35,8 @@ private:
     void saveDeviceState();
     void toggleLive();
     void updateLiveButton();
+    void checkForUpdates (bool userAsked);
+    void installUpdate();
 
     juce::PropertiesFile& props;
     AudioEngine engine;
@@ -45,7 +48,11 @@ private:
              settingsBtn { juce::String::fromUTF8 ("অডিও সেটিংস") },
              liveBtn { juce::String::fromUTF8 ("লাইভ মাইক বন্ধ") },
              homeBtn { juce::String::fromUTF8 ("হোম") },
-             resetBtn { juce::String::fromUTF8 ("নতুন শুরু") };
+             resetBtn { juce::String::fromUTF8 ("নতুন শুরু") },
+             updateBtn { juce::String::fromUTF8 ("আপডেট"), TFButton::Style::accent };
+    Updater updater;
+    Updater::Release available;
+    bool updateCheckScheduled = false;
     juce::Rectangle<int> headerArea, tabWell, devicePill;
 
     StudioView studio { engine, props };

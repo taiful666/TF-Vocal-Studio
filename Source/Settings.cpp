@@ -61,13 +61,14 @@ public:
             const auto cur = props.getValue ("camera");
             camBox.setSelectedId (cur.isEmpty() || ! cams.contains (cur) ? 1 : 2 + cams.indexOf (cur), juce::dontSendNotification);
         }
-        camBox.onChange = [this] { props.setValue ("camera", camBox.getSelectedId() > 1 ? camBox.getText() : juce::String()); camPicture = {}; repaint(); };
+        camBox.onChange = [this] { props.setValue ("camera", camBox.getSelectedId() > 1 ? camBox.getText() : juce::String()); camPicture = {}; camError = {}; resized(); repaint(); };
         addChildComponent (camBox);
         camTest.onClick = [this]
         {
             juce::String err;
             camPicture = camBox.getSelectedId() > 1 ? camera::snapshot (camBox.getText(), err) : juce::Image();
             camError = err;
+            resized();
             repaint();
         };
         addChildComponent (camTest);
@@ -101,6 +102,10 @@ public:
         camOffset.onChange = [this] (double v) { props.setValue ("camOffsetMs", v); };
         addChildComponent (camOffset);
 
+        updBtn.setIcon (icons::update(), false, 16.0f);
+        updBtn.onClick = [this] { if (onCheckUpdates) onCheckUpdates(); };
+        addChildComponent (updBtn);
+
         toneBtn.setIcon (icons::speaker(), false, 17.0f);
         toneBtn.onClick = [this] { engine.playTestTone(); };
         addChildComponent (toneBtn);
@@ -133,6 +138,7 @@ public:
         measureBtn.setVisible (p == 1);
         camOffset.setVisible (p == 1);
         toneBtn.setVisible (p == 2);
+        updBtn.setVisible (p == 2);
         resized();
         repaint();
     }
@@ -237,12 +243,13 @@ public:
         {
             auto d = in;
             if (engine.isMicSeparate()) { micBox.setBounds (d.removeFromTop (34).withTrimmedLeft (150)); d.removeFromTop (8); }
-            auto camRow = d.removeFromBottom (34);
+            auto camRow = d.removeFromTop (34);
             camTest.setBounds (camRow.removeFromRight (150));
             camRow.removeFromRight (8);
             camBox.setBounds (camRow.withTrimmedLeft (150));
-            d.removeFromBottom (8);
-            camPreview = d.removeFromBottom (camPicture.isValid() || camError.isNotEmpty() ? 110 : 0).withTrimmedLeft (150);
+            d.removeFromTop (8);
+            camPreview = d.removeFromTop (camPicture.isValid() || camError.isNotEmpty() ? 120 : 0).withTrimmedLeft (150);
+            if (! camPreview.isEmpty()) d.removeFromTop (8);
             selector.setBounds (d.withTrimmedLeft (-8));
         }
         auto rr = in.withTrimmedLeft (4).withTrimmedRight (4);
@@ -257,6 +264,7 @@ public:
         rr.removeFromTop (6);
         camOffset.setBounds (rr.removeFromTop (52));
         toneBtn.setBounds (juce::Rectangle<int> (200, 44).withPosition (body.getX() + 24, body.getBottom() - 70));
+        updBtn.setBounds (juce::Rectangle<int> (220, 44).withPosition (body.getRight() - 244, body.getBottom() - 70));
     }
 
 private:
@@ -275,6 +283,10 @@ private:
     juce::AudioDeviceSelectorComponent selector;
     LabeledSlider offset, preroll;
     juce::ComboBox micBox, camBox;
+public:
+    std::function<void()> onCheckUpdates;
+private:
+    TFButton updBtn { u8 ("আপডেট দেখুন") };
     TFButton camTest { u8 ("ক্যামেরা দেখুন") }, measureBtn { u8 ("সিঙ্ক নিজে থেকে মাপুন"), TFButton::Style::accent };
     juce::Image camPicture;
     juce::String camError, measureText;
@@ -291,10 +303,12 @@ private:
     }
 };
 
-void showAudioSettings (juce::Component* centreAround, AudioEngine& e, juce::PropertiesFile& p)
+void showAudioSettings (juce::Component* centreAround, AudioEngine& e, juce::PropertiesFile& p, std::function<void()> checkUpdates)
 {
     juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (new SettingsPanel (e, p));
+    auto* panel = new SettingsPanel (e, p);
+    panel->onCheckUpdates = std::move (checkUpdates);
+    o.content.setOwned (panel);
     o.dialogTitle = u8 ("অডিও সেটিংস");
     o.dialogBackgroundColour = col::bg;
     o.escapeKeyTriggersCloseButton = true;

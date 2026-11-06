@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(TFVocalStudio VERSION 1.0.0 LANGUAGES C CXX)
+# The version is set by the build server (-DTF_APP_VERSION=1.1.N); the app compares it with the
+# newest GitHub release for in-app updates.
+if(NOT TF_APP_VERSION)
+    set(TF_APP_VERSION 1.1.0)
+endif()
+project(TFVocalStudio VERSION ${TF_APP_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -93,7 +98,8 @@ target_sources(TFVocalStudio PRIVATE
     Source/AudioInput.cpp
     Source/MixTools.cpp
     Source/RecordAids.cpp
-    Source/Camera.cpp)
+    Source/Camera.cpp
+    Source/Updater.cpp)
 
 target_compile_definitions(TFVocalStudio PRIVATE
     JUCE_WEB_BROWSER=0
@@ -127,6 +133,7 @@ target_link_libraries(TFVocalStudio
         juce::juce_audio_formats
         juce::juce_dsp
         juce::juce_gui_extra
+        juce::juce_cryptography
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -154,7 +161,7 @@ if(TF_BUILD_TESTS)
     target_sources(TFUITest PRIVATE Tests/UITest.cpp
         Source/MainComponent.cpp Source/AudioEngine.cpp Source/Theme.cpp Source/StudioView.cpp Source/LibraryView.cpp
         Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp Source/Project.cpp Source/Stretch.cpp Source/Timeline.cpp
-        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp Source/RecordAids.cpp Source/Camera.cpp)
+        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp Source/RecordAids.cpp Source/Camera.cpp Source/Updater.cpp)
     target_include_directories(TFUITest PRIVATE Source Tests third_party)
     if(MSVC)
         target_compile_options(TFUITest PRIVATE /utf-8 /MP)
@@ -162,6 +169,6 @@ if(TF_BUILD_TESTS)
     target_compile_definitions(TFUITest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_USE_MP3AUDIOFORMAT=1 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1 JUCE_WASAPI=1 JUCE_DIRECTSOUND=1 JUCE_ASIO=0
         JUCE_STRICT_REFCOUNTEDPOINTER=1 JUCE_APPLICATION_VERSION_STRING="test")
-    target_link_libraries(TFUITest PRIVATE TFVSData rnnoise rubberband juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra
+    target_link_libraries(TFUITest PRIVATE TFVSData rnnoise rubberband juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra juce::juce_cryptography
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endif()

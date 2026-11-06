@@ -723,6 +723,41 @@ static void testMedia (const juce::File& tmp, const juce::File& song)
         auto pi = media::probe (vo.out);
         CHECK (e.isEmpty() && pi.hasVideo && pi.hasAudio && std::abs (pi.duration - 7.0) < 0.2, "MP4 from the lyrics video (" + juce::String (pi.duration, 2) + " s)" + (e.isEmpty() ? juce::String() : " " + e));
     }
+    // the singers' camera with the lyrics: wide and tall (Reels), camera starting after the video start
+    {
+        auto cam = tmp.getChildFile ("camera.ts");
+        juce::ChildProcess cp;
+        cp.start ({ media::ffmpeg().getFullPathName(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=30:duration=5",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-f", "mpegts", cam.getFullPathName() });
+        cp.waitForProcessToFinish (60000);
+        ProjectState ps;
+        TrackInfo t; t.id = "v"; t.kind = TrackKind::vocal;
+        ClipInfo c; c.id = "c"; c.file = wav; c.start = 0.0; c.in = 0.0; c.out = 6.0; c.camera = cam; c.cameraStart = 0.5;
+        t.clips.add (c); ps.tracks.add (t);
+        for (bool tall : { false, true })
+        {
+            videoexport::Options vo;
+            vo.state = ps; vo.mixWav = wav; vo.out = tmp.getChildFile (tall ? "camera tall.mp4" : "camera wide.mp4"); vo.title = "cam";
+            vo.lyrics = Lyrics::parse (juce::String::fromUTF8 ("[00:00.50]প্রথম লাইন\n[00:02.00]দ্বিতীয় লাইন"));
+            vo.rangeStart = 0.0; vo.length = 6.0; vo.camera = cam; vo.cameraStart = 0.5;
+            if (tall) { vo.width = 720; vo.height = 1280; }
+            auto e = videoexport::render (vo, nullptr, cancel);
+            if (auto snap = juce::SystemStats::getEnvironmentVariable ("TF_SNAP", {}); snap.isNotEmpty()) vo.out.copyFileTo (juce::File (snap).getChildFile (vo.out.getFileName()));
+            auto pi = media::probe (vo.out);
+            CHECK (e.isEmpty() && pi.hasVideo && pi.hasAudio && pi.width == vo.width && pi.height == vo.height && std::abs (pi.duration - 6.0) < 0.2,
+                   juce::String (tall ? "tall (9:16)" : "wide (16:9)") + " MP4 with the camera and lyrics (" + juce::String (pi.width) + "x" + juce::String (pi.height) + ", " + juce::String (pi.duration, 2) + " s)" + (e.isEmpty() ? juce::String() : " " + e));
+            // the camera picture is there (bright test pattern), the start before the camera is dark
+            juce::ChildProcess grab;
+            auto img = tmp.getChildFile ("frame.png");
+            grab.start ({ media::ffmpeg().getFullPathName(), "-hide_banner", "-loglevel", "error", "-y", "-ss", "2.0", "-i", vo.out.getFullPathName(), "-frames:v", "1", img.getFullPathName() });
+            grab.waitForProcessToFinish (30000);
+            auto im = juce::ImageFileFormat::loadFrom (img);
+            float bright = 0.0f;
+            if (im.isValid()) for (int y = 10; y < im.getHeight() / 3; y += 7) for (int x = 10; x < im.getWidth() - 10; x += 7) bright += im.getPixelAt (x, y).getBrightness();
+            CHECK (im.isValid() && bright / (float) ((im.getHeight() / 3 / 7) * ((im.getWidth() - 20) / 7)) > 0.3f, "the camera picture fills the frame");
+        }
+    }
+
 
 }
 

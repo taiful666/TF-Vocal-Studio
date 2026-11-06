@@ -27,8 +27,8 @@ void InputMeter::paint (juce::Graphics& g)
     auto label = r.removeFromTop (18.0f);
     g.setFont (font (12.5f, Weight::medium));
     g.setColour (col::muted);
-    g.drawText (u8 ("মাইক লেভেল"), label, juce::Justification::centredLeft);
-    const juce::String word = state > 0 ? u8 ("বেশি জোরে — মাইকের জোর কমান") : state < 0 ? u8 ("কম — কাছে এসে গাইন") : u8 ("ঠিক আছে");
+    g.drawText (u8 ("মাইক"), label, juce::Justification::centredLeft);
+    const juce::String word = state > 0 ? u8 ("বেশি জোরে") : state < 0 ? u8 ("কম") : u8 ("ঠিক আছে");
     g.setColour (state > 0 ? col::rec : state < 0 ? col::warn : col::ok);
     g.drawText (word, label, juce::Justification::centredRight);
 
@@ -93,6 +93,108 @@ void PitchMeter::paint (juce::Graphics& g)
         const float x = sc.getCentreX() + sc.getWidth() * 0.5f * juce::jlimit (-1.0f, 1.0f, shownCents / 50.0f);
         g.setColour (good ? col::ok : (std::abs (shownCents) < 30.0f ? col::warn : col::rec));
         g.fillEllipse (x - 6.0f, sc.getCentreY() - 6.0f, 12.0f, 12.0f);
+    }
+}
+
+//==============================================================================
+void TapTiming::start (const juce::StringArray& l, std::function<double (double)> songTime)
+{
+    lines.clear();
+    for (auto& x : l) if (x.trim().isNotEmpty()) lines.add (x.trim());
+    times.clear();
+    toSong = std::move (songTime);
+    active = true;
+    setVisible (true);
+    engine.setPosition (0.0);
+    engine.play();
+    startTimerHz (20);
+    resized();
+}
+
+void TapTiming::tap()
+{
+    if (! active || times.size() >= (size_t) lines.size()) return;
+    // people tap a moment after they hear the line start; what they hear left the speaker a little earlier still
+    const double heardDelay = 0.12 + engine.getRoundTripLatencyMs() / 2000.0;
+    const double t = juce::jmax (0.0, (toSong ? toSong (engine.getPosition()) : engine.getPosition()) - heardDelay);
+    if (! times.empty() && t <= times.back() + 0.05) return;
+    times.push_back (t);
+    repaint();
+}
+
+void TapTiming::undoTap() { if (! times.empty()) times.pop_back(); repaint(); }
+
+juce::String TapTiming::toLrc() const
+{
+    juce::String out;
+    auto stamp = [] (double t)
+    {
+        const int cs = (int) std::round (t * 100.0);
+        return "[" + juce::String (cs / 6000).paddedLeft ('0', 2) + ":" + juce::String ((cs / 100) % 60).paddedLeft ('0', 2) + "." + juce::String (cs % 100).paddedLeft ('0', 2) + "]";
+    };
+    double last = 0.0;
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        const double t = i < (int) times.size() ? times[(size_t) i] : last + 3.0;   // not tapped: shown 3 s after the previous
+        last = t;
+        out << stamp (t) << lines[i] << "\r\n";
+    }
+    return out;
+}
+
+void TapTiming::finish (bool save)
+{
+    stopTimer();
+    engine.pause();
+    active = false;
+    setVisible (false);
+    if (save && ! times.empty() && onSave) onSave (toLrc());
+    if (onClose) onClose();
+}
+
+void TapTiming::resized()
+{
+    auto r = getLocalBounds().reduced (30, 24);
+    auto bottom = r.removeFromBottom (54);
+    cancelBtn.setBounds (bottom.removeFromLeft (110));
+    bottom.removeFromLeft (10);
+    backBtn.setBounds (bottom.removeFromLeft (150));
+    saveBtn.setBounds (bottom.removeFromRight (140));
+    bottom.removeFromRight (14);
+    tapBtn.setBounds (bottom.withSizeKeepingCentre (juce::jmin (bottom.getWidth(), 340), 54));
+    saveBtn.setEnabled (! times.empty());
+}
+
+void TapTiming::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (0xf20E1014));
+    saveBtn.setEnabled (! times.empty());
+    backBtn.setEnabled (! times.empty());
+    tapBtn.setEnabled (times.size() < (size_t) lines.size());
+    auto r = getLocalBounds().reduced (30, 24);
+    g.setColour (col::ink); g.setFont (font (19.0f, Weight::semibold));
+    g.drawText (u8 ("ট্যাপ করে লিরিক্সের সময় মেলান"), r.removeFromTop (30), juce::Justification::centredLeft);
+    g.setColour (col::muted); g.setFont (font (14.0f));
+    g.drawText (u8 ("গান বাজছে — প্রতিটা লাইন গাওয়া শুরু হলেই নিচের বোতাম (বা Enter) চাপুন। ভুল হলে \"আগেরটা মুছুন\"।"), r.removeFromTop (24), juce::Justification::centredLeft, true);
+    g.drawText (bn ((int) times.size()) + " / " + bn (lines.size()) + u8 (" লাইন"), r.removeFromTop (24), juce::Justification::centredLeft, true);
+    r.removeFromBottom (70);
+    const int next = (int) times.size();
+    const float cy = (float) r.getCentreY();
+    for (int k = next - 2; k <= next + 2; ++k)
+    {
+        if (! juce::isPositiveAndBelow (k, lines.size())) continue;
+        const bool now = k == next;
+        g.setFont (font (now ? 34.0f : 22.0f, now ? Weight::semibold : Weight::regular));
+        g.setColour (now ? col::accent : (k < next ? col::dim : col::muted));
+        auto lr = juce::Rectangle<float> ((float) r.getX(), cy + (float) (k - next) * 52.0f - 22.0f, (float) r.getWidth(), 44.0f);
+        juce::String prefix;
+        if (k < next) prefix = bnTime (times[(size_t) k]) + "   ";
+        g.drawText (prefix + lines[k], lr, juce::Justification::centred, true);
+    }
+    if (next >= lines.size())
+    {
+        g.setColour (col::ok); g.setFont (font (18.0f, Weight::medium));
+        g.drawText (u8 ("সব লাইন হয়ে গেছে — সেভ করুন"), r.withTrimmedTop (r.getHeight() - 30), juce::Justification::centred);
     }
 }
 

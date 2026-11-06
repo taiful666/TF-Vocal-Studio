@@ -9,5 +9,5 @@ namespace tf
 void applySavedAudioSettings (AudioEngine&, juce::PropertiesFile&);
 
 /** Opens the audio settings window: device, recording & sync, and a status check. */
-void showAudioSettings (juce::Component* centreAround, AudioEngine&, juce::PropertiesFile&);
+void showAudioSettings (juce::Component* centreAround, AudioEngine&, juce::PropertiesFile&, std::function<void()> checkUpdates = {});
 }

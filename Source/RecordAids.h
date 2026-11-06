@@ -8,7 +8,7 @@ namespace tf
 //==============================================================================
 /** A large, clear microphone level bar for recording: shows whether the voice is too soft,
     just right or too loud (with a word, not only colours). */
-class InputMeter : public juce::Component
+class InputMeter : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     void setLevel (float peak);
@@ -34,6 +34,49 @@ private:
     float cents = 0.0f, shownCents = 0.0f;
     bool voiced = false, inScale = true;
     int silentFrames = 100;
+};
+
+//==============================================================================
+/** Easy karaoke timing: the song plays, and one tap (button or Enter) marks where each line starts.
+    The result is saved as timed (.lrc) lyrics. */
+class TapTiming : public juce::Component, private juce::Timer
+{
+public:
+    TapTiming (AudioEngine& e) : engine (e)
+    {
+        for (auto* b : { &tapBtn, &backBtn, &saveBtn, &cancelBtn }) { b->setRadius (12.0f); addAndMakeVisible (b); }
+        tapBtn.setFontSize (20.0f);
+        tapBtn.onClick = [this] { tap(); };
+        backBtn.onClick = [this] { undoTap(); };
+        saveBtn.onClick = [this] { finish (true); };
+        cancelBtn.onClick = [this] { finish (false); };
+    }
+    /** lines: the plain lyrics; songTime: timeline -> song time (the music may be sped up). */
+    void start (const juce::StringArray& lines, std::function<double (double)> songTime);
+    void tap();
+    void undoTap();
+    bool isActive() const noexcept { return active; }
+    int tapped() const noexcept { return (int) times.size(); }
+    /** The timed lyrics as .lrc text. */
+    juce::String toLrc() const;
+    std::function<void (const juce::String& lrc)> onSave;
+    std::function<void()> onClose;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+private:
+    void timerCallback() override { repaint(); }
+    void finish (bool save);
+    AudioEngine& engine;
+    juce::StringArray lines;
+    std::vector<double> times;
+    std::function<double (double)> toSong;
+    bool active = false;
+    friend struct UITest;
+    TFButton tapBtn { juce::String::fromUTF8 ("এই লাইন শুরু (Enter)"), TFButton::Style::primary },
+             backBtn { juce::String::fromUTF8 ("আগেরটা মুছুন") },
+             saveBtn { juce::String::fromUTF8 ("সেভ করুন"), TFButton::Style::accent },
+             cancelBtn { juce::String::fromUTF8 ("বাতিল") };
 };
 
 //==============================================================================

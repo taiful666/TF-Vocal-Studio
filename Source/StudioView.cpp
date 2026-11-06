@@ -538,9 +538,13 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     for (auto* b : { &toStartBtn, &stopBtn, &playBtn, &recBtn, &saveBtn }) addAndMakeVisible (b);
     addAndMakeVisible (inMeter);
     inMeter.setTitle (u8 ("মাইক লেভেল"));
+    inMeter.setTooltip (u8 ("গাওয়ার সময় দাগ সবুজ অংশে থাকলে ঠিক আছে। \"কম\" দেখালে মাইকের কাছে এসে গাইন বা মাইকের জোর বাড়ান, \"বেশি জোরে\" দেখালে একটু দূরে সরুন বা জোর কমান।"));
     addChildComponent (pitchMeter);
     pitchMeter.setTooltip (u8 ("যে সুরে গাইছেন — সবুজ মানে ঠিক সুরে। পাশে সরগম (গানের স্কেল অনুযায়ী)"));
     addChildComponent (countIn);
+    addChildComponent (tapView);
+    tapView.onSave = [this] (const juce::String& lrc) { saveLyrics (lrc); if (toast) toast (u8 ("লিরিক্স এখন গানের সাথে সাথে চলবে")); };
+    tapView.onClose = [this] { focusMainWindow (this); };
 
     // stage toolbar
     addBtn.setIcon (icons::plus(), false, 16.0f);
@@ -1201,7 +1205,7 @@ public:
         juce::Rectangle<int> valueArea;
     };
 
-    LyricsPanel (LyricsView& v, std::function<void (double)> offsetChanged, std::function<void()> edit)
+    LyricsPanel (LyricsView& v, std::function<void (double)> offsetChanged, std::function<void()> edit, std::function<void()> tap, bool canTap)
         : stage (v),
           size (u8 ("লেখার আকার"), [&v] { return bn ((int) std::round (v.getFontSize())); }, [&v] (int d) { v.changeFontSize (3.0f * (float) d); }),
           speed (u8 ("স্ক্রলের গতি"), [&v] { return bn (juce::String (v.getSpeed(), 1)) + "x"; }, [&v] (int d) { v.changeSpeed (0.1f * (float) d); }),
@@ -1220,7 +1224,18 @@ public:
             if (edit) juce::MessageManager::callAsync (edit);
         };
         addAndMakeVisible (editBtn);
-        setSize (360, 20 + 46 * (speed.isVisible() ? 3 : 2) + 26 + 44 + 18);
+        tapBtn.setRadius (10.0f);
+        tapBtn.setIcon (icons::music(), false, 16.0f);
+        tapBtn.setEnabled (canTap);
+        tapBtn.setTooltip (canTap ? u8 ("গান বাজবে — প্রতিটা লাইন শুরু হওয়ার সময় একবার চাপুন (Enter)। এতে লিরিক্স গানের সাথে সাথে চলবে।")
+                                  : u8 ("আগে মিউজিক আর লিরিক্স দুটোই দিন"));
+        tapBtn.onClick = [this, tap]
+        {
+            if (auto* box = findParentComponentOfClass<juce::CallOutBox>()) box->dismiss();
+            if (tap) tap();
+        };
+        addAndMakeVisible (tapBtn);
+        setSize (360, 20 + 46 * (speed.isVisible() ? 3 : 2) + 26 + 44 + 8 + 44 + 18);
     }
     void resized() override
     {
@@ -1230,6 +1245,8 @@ public:
         sync.setBounds (r.removeFromTop (46));
         hint = r.removeFromTop (26);
         editBtn.setBounds (r.removeFromTop (44));
+        r.removeFromTop (8);
+        tapBtn.setBounds (r.removeFromTop (44));
     }
     void paint (juce::Graphics& g) override
     {
@@ -1238,16 +1255,30 @@ public:
     }
     LyricsView& stage;
     StepRow size, speed, sync;
-    TFButton editBtn { u8 ("লিরিক্স লিখুন / বদলান") };
+    TFButton editBtn { u8 ("লিরিক্স লিখুন / বদলান") }, tapBtn { u8 ("ট্যাপ করে সময় মেলান") };
     juce::Rectangle<int> hint;
 };
+
+void StudioView::startTapTiming()
+{
+    if (lyrics.isEmpty() || project.state().musicTrack() == nullptr || engine.isRecording()) return;
+    juce::StringArray rows;
+    for (auto& l : lyrics.lines) rows.add (l.text);
+    lyricsEditor.setVisible (false);
+    tapView.toFront (false);
+    tapView.start (rows, [this] (double t) { const double s = project.state().musicTimeAt (t); return s >= 0.0 ? s : t; });
+    tapView.grabKeyboardFocus();
+    focusMainWindow (this);
+}
 
 void StudioView::showLyricsPanel()
 {
     juce::Component::SafePointer<StudioView> safe (this);
     auto panel = std::make_unique<LyricsPanel> (stage,
         [safe] (double o) { if (safe != nullptr) safe->props.setValue ("lyrOffset|" + safe->lyricsFile().getFullPathName(), o); },
-        [safe] { if (safe != nullptr) safe->openLyricsEditor(); });
+        [safe] { if (safe != nullptr) safe->openLyricsEditor(); },
+        [safe] { if (safe != nullptr) safe->startTapTiming(); },
+        ! lyrics.isEmpty() && project.state().musicTrack() != nullptr);
     juce::CallOutBox::launchAsynchronously (std::move (panel), getLocalArea (&lyricsBtn, lyricsBtn.getLocalBounds()), this);
 }
 
@@ -1387,6 +1418,11 @@ public:
         for (size_t i = 0; i < formats.size(); ++i)
         {
             auto b = buttons[(int) i]->getBounds();
+            auto card = b.withBottom (b.getBottom() + 18).toFloat().expanded (2.0f);
+            g.setColour (col::panel);
+            g.fillRoundedRectangle (card, 12.0f);
+            g.setColour (formats[i].id == chosen ? col::accent.withAlpha (0.8f) : col::border);
+            g.drawRoundedRectangle (card.reduced (0.5f), 12.0f, formats[i].id == chosen ? 1.5f : 1.0f);
             g.setColour (col::dim); g.setFont (font (12.0f));
             g.drawText (formats[i].sub, b.withY (b.getBottom() + 1).withHeight (16), juce::Justification::centred, true);
         }
@@ -1759,6 +1795,7 @@ void StudioView::resized()
     lyricsEditor.setBounds (stageCard);
     overlay.setBounds (stageCard);
     countIn.setBounds (stageCard.reduced (2));
+    tapView.setBounds (stageCard.reduced (2));
 
     auto tr = transportCard.reduced (16, 10);
     timeArea = tr.removeFromLeft (180);

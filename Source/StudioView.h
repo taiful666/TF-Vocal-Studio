@@ -169,6 +169,9 @@ public:
     void togglePlay();
     void toggleRecord();
     bool isCountingIn() const { return countIn.isCounting(); }
+    void startTapTiming();
+    bool isTapping() const { return tapView.isActive(); }
+    void tapLine() { tapView.tap(); }
     void goToStart();
     void chooseFile (bool video = false);
     void undo()  { if (! engine.isRecording()) project.undo(); }
@@ -265,6 +268,7 @@ private:
     InputMeter inMeter;
     PitchMeter pitchMeter;
     CountIn countIn { engine };
+    TapTiming tapView { engine };
 
     std::unique_ptr<juce::FileChooser> chooser;
     camera::Recorder camRec;

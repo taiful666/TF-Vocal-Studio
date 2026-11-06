@@ -6,6 +6,7 @@
 #include "Settings.h"
 #include "FakeDevice.h"
 #include "MixTools.h"
+#include "Updater.h"
 #include "InspectorContent.h"
 #include <juce_events/juce_events.h>
 
@@ -49,6 +50,16 @@ struct UITest
 {
     static int run();
 };
+
+/** TF_SNAP=<folder>: save pictures of the screens (for checking the design by eye). */
+static void snap (juce::Component& c, const juce::String& name)
+{
+    auto dir = juce::SystemStats::getEnvironmentVariable ("TF_SNAP", {});
+    if (dir.isEmpty()) return;
+    auto img = c.createComponentSnapshot (c.getLocalBounds(), true, 1.0f);
+    juce::FileOutputStream fos (juce::File (dir).getChildFile (name + ".png"));
+    if (fos.openedOk()) { fos.setPosition (0); fos.truncate(); juce::PNGImageFormat().writeImageToStream (img, fos); }
+}
 
 static void makeSong (const juce::File& f, double seconds)
 {
@@ -558,6 +569,74 @@ int UITest::run()
         pump (50);
         CHECK (tl.getHeight() > h0 + 40, "dragging the divider makes the timeline taller (" + juce::String (h0) + " -> " + juce::String (tl.getHeight()) + " px)");
         studio.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), split, {}, 1.0f, 0, 0, 0, 0, &studio, &studio, juce::Time::getCurrentTime(), split, juce::Time::getCurrentTime(), 2, false));
+        pump (100);
+        tl.selectTrack (voiceId());
+        tl.zoomSlider.setValue (90.0, juce::sendNotificationSync);
+        pump (200);
+        snap (*mc, "main-window");
+        // the save window and the settings, as the user sees them
+        studio.showExportPanel();
+        pump (400);
+        for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+            if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i); w != nullptr && w->getName().contains (juce::String::fromUTF8 ("এক্সপোর্ট")))
+            {
+                snap (*w, "export-window");
+                delete w;
+            }
+        mc->showSettings();
+        pump (400);
+        for (int i = 0; i < juce::TopLevelWindow::getNumTopLevelWindows(); ++i)
+            if (auto* w = juce::TopLevelWindow::getTopLevelWindow (i); w != nullptr && w->getName().contains (juce::String::fromUTF8 ("অডিও সেটিংস")))
+            {
+                snap (*w, "settings-window");
+                delete w;
+            }
+        pump (100);
+    }
+
+    // ------------------------------------------------------------------ 17. lyrics timing by tapping
+    std::cout << "\n17. Lyrics timing by tapping\n";
+    {
+        const auto before = studio.lyricsFile().existsAsFile() ? Lyrics::readTextFile (studio.lyricsFile()) : juce::String();
+        studio.saveLyrics (juce::String::fromUTF8 ("প্রথম লাইন\nদ্বিতীয় লাইন\nতৃতীয় লাইন"));
+        CHECK (! studio.lyrics.timed && studio.lyrics.lines.size() == 3, "plain lyrics to start with");
+        studio.startTapTiming();
+        CHECK (studio.isTapping() && engine.isPlaying(), "tapping mode plays the song");
+        pump (1000);
+        mc->keyPressed (juce::KeyPress (juce::KeyPress::returnKey));
+        pump (800);
+        click (studio.tapView.tapBtn);
+        pump (800);
+        click (studio.tapView.tapBtn);
+        pump (100);
+        CHECK (studio.tapView.tapped() == 3, "three taps, three lines");
+        click (studio.tapView.saveBtn);
+        pump (300);
+        CHECK (studio.lyrics.timed && studio.lyrics.lines.size() == 3 && studio.lyrics.lines[0].time >= 0.5 && studio.lyrics.lines[1].time > studio.lyrics.lines[0].time + 0.5
+               && studio.lyrics.lines[2].time > studio.lyrics.lines[1].time + 0.5,
+               "saved as karaoke-timed lyrics (" + juce::String (studio.lyrics.lines[0].time, 2) + ", " + juce::String (studio.lyrics.lines[1].time, 2) + ", " + juce::String (studio.lyrics.lines[2].time, 2) + " s)");
+        CHECK (! studio.isTapping() && ! engine.isPlaying(), "tapping mode closes and the song stops");
+        studio.saveLyrics (before);
+    }
+
+    // ------------------------------------------------------------------ 18. in-app update (safety rules)
+    std::cout << "\n18. In-app update checks\n";
+    {
+        CHECK (Updater::isNewer ("1.1.12", "1.1.9") && Updater::isNewer ("v1.2.0", "1.1.40") && ! Updater::isNewer ("1.1.9", "1.1.9") && ! Updater::isNewer ("1.0.7", "1.1.3"),
+               "version comparison");
+        const juce::String okJson = R"({"tag_name":"v1.1.20","draft":false,"prerelease":false,"body":"notes","assets":[
+            {"name":"TF-Vocal-Studio-Setup-1.1.20.exe","size":123,"digest":"sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+             "browser_download_url":"https://github.com/taiful666/TF-Vocal-Studio/releases/download/v1.1.20/TF-Vocal-Studio-Setup-1.1.20.exe"}]})";
+        auto r = Updater::parseRelease (okJson);
+        CHECK (r.isValid() && r.version == "1.1.20" && r.sha256 == "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "release read: version, installer, checksum");
+        auto bad = Updater::parseRelease (okJson.replace ("https://github.com/taiful666/TF-Vocal-Studio/releases/download/", "https://evil.example.com/"));
+        CHECK (! bad.isValid(), "an installer from anywhere else is refused");
+        auto noSum = Updater::parseRelease (okJson.replace (R"("digest":"sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789",)", ""));
+        CHECK (! noSum.isValid(), "an installer without a published checksum is refused");
+        CHECK (! Updater::parseRelease (okJson.replace ("\"prerelease\":false", "\"prerelease\":true")).isValid(), "test (pre-)releases are ignored");
+        auto f = tmp.getChildFile ("sum.bin");
+        f.replaceWithText ("abc");
+        CHECK (Updater::sha256Of (f) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 check of the download");
     }
 
     // ------------------------------------------------------------------ 15. exports
