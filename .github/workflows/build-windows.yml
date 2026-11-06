@@ -1,0 +1,77 @@
+name: Build Windows Setup
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Get source
+        uses: actions/checkout@v4
+
+      - name: Configure (Visual Studio 2022, x64, with tests)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DTF_BUILD_TESTS=ON
+
+      - name: Build app and engine test (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Run engine test (sample-accurate sync, noise removal, export, CPU load)
+        run: '& "build\TFEngineTest_artefacts\Release\TFEngineTest.exe"'
+
+      - name: Work out version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart("v") } else { $v = "1.0.0-build${{ github.run_number }}" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Make Setup.exe
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "build\TFVocalStudio_artefacts\Release\TF Vocal Studio.exe"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" "/DSourceExe=$exe" installer\TFVocalStudio.iss
+          Get-FileHash installer\Output\*.exe -Algorithm SHA256 | Format-List
+
+      - name: Upload Setup.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: TF-Vocal-Studio-Setup
+          path: installer/Output/*.exe
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: TF-Vocal-Studio-Setup
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          name: TF Vocal Studio ${{ github.ref_name }}
+          body: |
+            TF Vocal Studio — Windows 10/11 (64-bit)
+
+            ডাউনলোড করুন: নিচের **TF-Vocal-Studio-Setup-….exe** ফাইলে ক্লিক করুন, তারপর ডাবল-ক্লিক করে ইনস্টল করুন।
