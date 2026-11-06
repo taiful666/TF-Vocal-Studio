@@ -594,6 +594,30 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     timeline.onRedoPart = [this] (const juce::String& id, juce::Range<double> r) { startRedoPart (id, r); };
     timeline.onExportPart = [this] (juce::Range<double> r) { exportRange (r, true); };
     timeline.toast = [this] (const juce::String& t) { if (toast) toast (t); };
+    timeline.presetList = [this] { return inspector.presetNames(); };
+    timeline.onTrackAction = [this] (TimelineView::Action a, const juce::String& id, const juce::String& v)
+    {
+        timeline.selectTrack (id);
+        switch (a)
+        {
+            case TimelineView::Action::cleanNoise:  inspector.cleanVoice (Inspector::CleanKind::noise, id); break;
+            case TimelineView::Action::cleanBleed:  inspector.cleanVoice (Inspector::CleanKind::bleed, id); break;
+            case TimelineView::Action::balance:     inspector.autoBalance(); break;
+            case TimelineView::Action::preset:      inspector.choosePreset (v); break;
+            case TimelineView::Action::speed:       inspector.applySpeed (v.getIntValue() / 100.0); break;
+            case TimelineView::Action::key:         inspector.applyKey (v.getIntValue()); break;
+            case TimelineView::Action::changeMusic: showAddMenu(); break;
+            case TimelineView::Action::exportTrack:
+            {
+                auto st = project.state();
+                for (auto& t : st.tracks) { t.solo = t.id == id; }
+                const auto i = st.indexOf (id);
+                const auto suffix = i >= 0 ? " (" + st.tracks.getReference (i).name + ")" : juce::String();
+                startExports ({ ExportJob { st, {}, ExportFormat::mp3, suffix } });
+                break;
+            }
+        }
+    };
     inspector.toast = [this] (const juce::String& t) { if (toast) toast (t); };
     inspector.onChangeMusic = [this] { showAddMenu(); };
     inspector.onNoiseChanged = [this] { updateNoiseButton(); };
@@ -611,6 +635,7 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
 
     updateTransportButtons();
     updateToolbar();
+    timelineHeight = props.getIntValue ("timelineH", -1);
     startTimerHz (30);
 }
 
@@ -1347,10 +1372,47 @@ void StudioView::runNextExport()
 }
 
 //==============================================================================
+void StudioView::mouseMove (const juce::MouseEvent& e)
+{
+    setMouseCursor (splitterArea.contains (e.getPosition()) ? juce::MouseCursor::UpDownResizeCursor : juce::MouseCursor::NormalCursor);
+}
+
+void StudioView::mouseDown (const juce::MouseEvent& e)
+{
+    draggingSplitter = splitterArea.contains (e.getPosition());
+    dragStartHeight = timeline.getHeight();
+}
+
+void StudioView::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! draggingSplitter) return;
+    timelineHeight = dragStartHeight - e.getDistanceFromDragStartY();
+    resized();
+    repaint();
+}
+
+void StudioView::mouseUp (const juce::MouseEvent&)
+{
+    if (draggingSplitter) props.setValue ("timelineH", timeline.getHeight());
+    draggingSplitter = false;
+}
+
+void StudioView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    // double-click the divider: back to the automatic height
+    if (splitterArea.contains (e.getPosition())) { timelineHeight = -1; props.removeValue ("timelineH"); resized(); repaint(); }
+}
+
 void StudioView::paint (juce::Graphics& g)
 {
     paintCard (g, stageCard);
     paintCard (g, transportCard);
+    {
+        // the divider grip between the stage and the timeline
+        auto grip = splitterArea.withSizeKeepingCentre (56, 4).toFloat();
+        g.setColour (draggingSplitter ? col::accent : col::border.brighter (0.25f));
+        g.fillRoundedRectangle (grip, 2.0f);
+    }
 
     if (! stage.showingHome())
     {
@@ -1406,9 +1468,12 @@ void StudioView::resized()
 
     transportCard = r.removeFromBottom (76);
     r.removeFromBottom (12);
-    const int tlH = juce::jlimit (200, juce::jmax (200, (int) (r.getHeight() * 0.55f)), timeline.getIdealHeight());
+    // the timeline height: as the tracks need, or as the user dragged the divider
+    const int maxH = juce::jmax (180, r.getHeight() - 220);
+    const int tlH = timelineHeight > 0 ? juce::jlimit (170, maxH, timelineHeight)
+                                       : juce::jlimit (200, juce::jmax (200, (int) (r.getHeight() * 0.55f)), timeline.getIdealHeight());
     timeline.setBounds (r.removeFromBottom (tlH));
-    r.removeFromBottom (12);
+    splitterArea = r.removeFromBottom (12);
     stageCard = r;
 
     // header row inside the stage card: title on the left, tools on the right

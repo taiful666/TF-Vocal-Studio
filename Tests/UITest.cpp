@@ -429,6 +429,108 @@ int UITest::run()
         CHECK (state().musicTrack()->semitones == 0, "undo brings the original key back");
     }
 
+    // ------------------------------------------------------------------ 16. timeline editing (pieces)
+    std::cout << "\n16. Timeline editing\n";
+    {
+        tl.zoomToFit();
+        pump (50);
+        const int vi = voiceIndex();
+        auto clipsNow = [&] { return state().tracks.getReference (voiceIndex()).clips; };
+        auto widest = [&]
+        {
+            ClipInfo best; double w = -1;
+            for (auto& c : clipsNow()) if (c.length() > w) { w = c.length(); best = c; }
+            return best;
+        };
+        const int n0 = clipsNow().size();
+
+        // split with the scissors on the cut bar (the selected track)
+        tl.selectTrack (voiceId());
+        pump (50);
+        auto c = widest();
+        engine.setPosition (c.start + c.length() * 0.5);
+        pump (80);
+        tl.repaint();
+        auto sc = tl.scissorsRect().getCentre();
+        mouse (tl, sc, sc, false);
+        pump (80);
+        CHECK (clipsNow().size() == n0 + 1, "scissors splits the piece at the cut bar (" + juce::String (n0) + " -> " + juce::String (clipsNow().size()) + " pieces)");
+
+        // click a piece, press Delete: it is gone (the v1.0.7 bug)
+        c = widest();
+        const float y = laneY (vi);
+        mouse (tl, { tl.timeToX (c.start + c.length() * 0.5), y }, { tl.timeToX (c.start + c.length() * 0.5), y }, false);
+        CHECK (tl.getSelectedClip() == c.id, "a click selects the piece");
+        mc->keyPressed (juce::KeyPress (juce::KeyPress::deleteKey));
+        pump (80);
+        bool gone = true; for (auto& x : clipsNow()) gone &= x.id != c.id;
+        CHECK (gone, "Delete removes the selected piece");
+        click (tl.undoBtn);
+
+        // the small x on a piece (zoomed in, so the pieces are wide)
+        c = widest();
+        tl.zoomSlider.setValue (120.0, juce::sendNotificationSync);
+        tl.scrollSec = juce::jmax (0.0, c.start - 0.3);
+        tl.resized();
+        pump (50);
+        auto r = tl.clipRect (vi, c);
+        auto xr = tl.closeRect (r);
+        CHECK (! xr.isEmpty(), "every wide piece shows its x");
+        mouse (tl, xr.getCentre(), xr.getCentre(), false);
+        pump (80);
+        gone = true; for (auto& x : clipsNow()) gone &= x.id != c.id;
+        CHECK (gone, "the x deletes that piece");
+        click (tl.undoBtn);
+
+        // trim the right edge 0.5 s shorter, then the left edge 0.4 s later
+        c = widest();
+        r = tl.clipRect (vi, c);
+        mouse (tl, { r.getRight() - 2.0f, y }, { tl.timeToX (c.end() - 0.5), y }, true);
+        pump (80);
+        ClipInfo t1; for (auto& x : clipsNow()) if (x.id == c.id) t1 = x;
+        CHECK (std::abs (t1.end() - (c.end() - 0.5)) < 0.08 && std::abs (t1.start - c.start) < 1e-6, "dragging the right edge trims the end (" + juce::String (c.end() - t1.end(), 2) + " s)");
+        r = tl.clipRect (vi, t1);
+        mouse (tl, { r.getX() + 2.0f, y }, { tl.timeToX (t1.start + 0.4), y }, true);
+        pump (80);
+        ClipInfo t2; for (auto& x : clipsNow()) if (x.id == c.id) t2 = x;
+        CHECK (std::abs (t2.start - (t1.start + 0.4)) < 0.08 && std::abs ((t2.in - t1.in) - (t2.start - t1.start)) < 1e-6 && std::abs (t2.end() - t1.end()) < 1e-6,
+               "dragging the left edge trims the start, the audio stays in place");
+        click (tl.undoBtn);
+        click (tl.undoBtn);
+
+        // takes: every recording is kept; an earlier take can be put back for a piece
+        const auto& vt = state().tracks.getReference (voiceIndex());
+        CHECK (vt.takes.size() >= 2, "every recording is kept as a take (" + juce::String (vt.takes.size()) + ")");
+        if (vt.takes.size() >= 2)
+        {
+            c = widest();
+            ClipInfo other;
+            for (auto& k : vt.takes) if (k.file != c.file && k.start < c.end() && k.end() > c.start) other = k;
+            if (other.file != juce::File())
+            {
+                project.useTake (vt.id, c.id, other);
+                bool used = false; for (auto& x : clipsNow()) used |= x.file == other.file;
+                CHECK (used && state().tracks.getReference (voiceIndex()).takes.size() == vt.takes.size(), "an earlier take replaces the piece (no extra take made)");
+                click (tl.undoBtn);
+            }
+        }
+
+        // zoom slider
+        const double z0 = tl.pxPerSec;
+        tl.zoomSlider.setValue (z0 * 2.0);
+        pump (50);
+        CHECK (std::abs (tl.pxPerSec - z0 * 2.0) < 0.5, "zoom slider zooms in");
+        tl.zoomToFit();
+
+        // the timeline can be made taller / shorter by dragging the divider
+        const int h0 = tl.getHeight();
+        auto split = studio.splitterArea.getCentre().toFloat();
+        mouse (studio, split, split.translated (0.0f, -60.0f), true);
+        pump (50);
+        CHECK (tl.getHeight() > h0 + 40, "dragging the divider makes the timeline taller (" + juce::String (h0) + " -> " + juce::String (tl.getHeight()) + " px)");
+        studio.mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(), split, {}, 1.0f, 0, 0, 0, 0, &studio, &studio, juce::Time::getCurrentTime(), split, juce::Time::getCurrentTime(), 2, false));
+    }
+
     // ------------------------------------------------------------------ 15. exports
     std::cout << "\n15. Exports\n";
     {

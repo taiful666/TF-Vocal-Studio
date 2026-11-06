@@ -175,6 +175,12 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void splitAtPlayhead() { timeline.splitAtPlayhead(); }
 
     bool isInterestedInFileDrag (const juce::StringArray&) override;
     void filesDropped (const juce::StringArray&, int, int) override;
@@ -213,7 +219,9 @@ private:
     Project project;
     Lyrics lyrics;
 
-    juce::Rectangle<int> stageCard, transportCard, timeArea, headArea, meterArea;
+    juce::Rectangle<int> stageCard, transportCard, timeArea, headArea, meterArea, splitterArea;
+    int timelineHeight = -1, dragStartHeight = 0;
+    bool draggingSplitter = false;
     LyricsView stage { engine, project, props };
     TimelineView timeline { project, engine };
     Inspector inspector { project, engine, props };

@@ -132,16 +132,20 @@ private:
     void renameUserPreset();
     juce::String presetSummary() const;
 
+public:
     // music jobs
     void applySpeed (double speed);
     void applyKey (int semitones);
-    void renderMusic (double speed, int semitones, bool isSpeed);
     void cancelJob();
-public:
     // recording clean-up and smart mix (also used by the right-click menu and the transport button)
     enum class CleanKind { noise, bleed };
     void cleanVoice (CleanKind, const juce::String& trackId = {});
     void autoBalance();
+    /** For the right-click menu: all presets (id -> name), and applying one to the shown track. */
+    juce::StringPairArray presetNames() const;
+    void choosePreset (const juce::String& id) { selectPreset (id); }
+private:
+    void renderMusic (double speed, int semitones, bool isSpeed);
 private:
 
     Project& project;

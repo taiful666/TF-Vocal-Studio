@@ -34,13 +34,22 @@ public:
     juce::Range<double> getSelection() const { return selection; }
     juce::String getSelectionTrack() const { return selectionTrack; }
     void clearSelection();
+    /** Delete key: the selected part, or else the selected clip. */
     void deleteSelection();
     void zoomToFit();
+    /** Scissors: splits the selected track's clip at the playhead (or every track with a clip there). */
+    void splitAtPlayhead();
+    juce::String getSelectedClip() const { return selectedClip; }
+    void selectClip (const juce::String& trackId, const juce::String& clipId);
 
     std::function<void (const juce::String&)> onTrackSelected;
     std::function<void (const juce::String& trackId, juce::Range<double>)> onRedoPart;
     std::function<void (juce::Range<double>)> onExportPart;
     std::function<void (const juce::String&)> toast;
+    /** Track actions offered on right-click that live elsewhere (clean-up, presets, speed...). */
+    enum class Action { cleanNoise, cleanBleed, balance, preset, speed, key, changeMusic, exportTrack };
+    std::function<void (Action, const juce::String& trackId, const juce::String& value)> onTrackAction;
+    std::function<juce::StringPairArray()> presetList;   // id -> name, for the right-click menu
 
     void paint (juce::Graphics&) override;
     void paintOverChildren (juce::Graphics&) override;
@@ -62,6 +71,15 @@ private:
     int laneIndexAt (int y) const;
     juce::Rectangle<int> laneArea (int index) const;
     const ClipInfo* clipAt (int lane, double t, juce::String& trackIdOut) const;
+    juce::Rectangle<float> clipRect (int lane, const ClipInfo& c) const;
+    juce::Rectangle<float> closeRect (const juce::Rectangle<float>& clip) const;
+    juce::Rectangle<float> scissorsRect() const;
+    /** Hit test: which clip, and whether on its left/right edge (trim) or its x (delete). */
+    struct Hit { const ClipInfo* clip = nullptr; juce::String trackId; int lane = -1; int edge = 0; bool close = false; };
+    Hit hitTest (juce::Point<int> p) const;
+    void showClipMenu (const Hit&, double t);
+    void showTrackMenu (const juce::String& trackId);
+    void updateVScroll();
     double visibleSeconds() const;
     void ensurePlayheadVisible();
 
@@ -83,6 +101,9 @@ private:
              addTrackBtn { juce::String::fromUTF8 ("কণ্ঠ ট্র্যাক") },
              undoBtn { juce::String::fromUTF8 ("আগের অবস্থা") }, redoBtn { juce::String::fromUTF8 ("আবার করুন") },
              zoomOutBtn { juce::String::fromUTF8 ("ছোট") }, zoomInBtn { juce::String::fromUTF8 ("বড়") };
+    juce::Slider zoomSlider;
+    juce::ScrollBar vScroll { true };
+    int vOffset = 0;
     juce::Rectangle<int> toolWell;
 
     bool moveMode = false;
@@ -90,8 +111,11 @@ private:
     juce::String selectedTrack, selectionTrack;
     juce::Range<double> selection;
 
-    enum class Drag { none, select, move, seek };
+    enum class Drag { none, select, move, seek, trim };
     Drag drag = Drag::none;
+    juce::String selectedClip, selectedClipTrack;
+    int trimEdge = 0;          // -1 left, +1 right
+    double trimTo = 0.0;
     double dragAnchor = 0.0, dragOrigStart = 0.0, dragDelta = 0.0;
     juce::String dragTrack, dragClip;
     bool dragMoved = false;

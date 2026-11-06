@@ -667,6 +667,13 @@ void Inspector::cleanVoice (CleanKind kind, const juce::String& forTrack)
     });
 }
 
+juce::StringPairArray Inspector::presetNames() const
+{
+    juce::StringPairArray r;
+    for (auto& p : allPresets()) r.set (p.id, p.name);
+    return r;
+}
+
 void Inspector::autoBalance()
 {
     if (busy.exchange (true)) return;

@@ -144,6 +144,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& k)
     if ((k.getKeyCode() == 'R' || k.getKeyCode() == 'r') && ! k.getModifiers().isCommandDown()) { if (studio.isVisible()) studio.toggleRecord(); return true; }
     if ((k.getKeyCode() == 'L' || k.getKeyCode() == 'l') && ! k.getModifiers().isCommandDown()) { toggleLive(); return true; }
     if (k == juce::KeyPress::homeKey)                                    { studio.goToStart(); return true; }
+    if ((k.getKeyCode() == 'S' || k.getKeyCode() == 's') && ! k.getModifiers().isCommandDown()) { if (studio.isVisible()) studio.splitAtPlayhead(); return true; }
     if (k == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { showPage (0); studio.chooseFile(); return true; }
     if (k == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { studio.undo(); return true; }
     if (k == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)
