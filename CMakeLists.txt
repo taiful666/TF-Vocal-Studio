@@ -91,7 +91,9 @@ target_sources(TFVocalStudio PRIVATE
     Source/Settings.cpp
     Source/VideoExport.cpp
     Source/AudioInput.cpp
-    Source/MixTools.cpp)
+    Source/MixTools.cpp
+    Source/RecordAids.cpp
+    Source/Camera.cpp)
 
 target_compile_definitions(TFVocalStudio PRIVATE
     JUCE_WEB_BROWSER=0
@@ -152,7 +154,7 @@ if(TF_BUILD_TESTS)
     target_sources(TFUITest PRIVATE Tests/UITest.cpp
         Source/MainComponent.cpp Source/AudioEngine.cpp Source/Theme.cpp Source/StudioView.cpp Source/LibraryView.cpp
         Source/Lyrics.cpp Source/VocalFx.cpp Source/Media.cpp Source/Project.cpp Source/Stretch.cpp Source/Timeline.cpp
-        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp)
+        Source/Inspector.cpp Source/Settings.cpp Source/VideoExport.cpp Source/AudioInput.cpp Source/MixTools.cpp Source/RecordAids.cpp Source/Camera.cpp)
     target_include_directories(TFUITest PRIVATE Source Tests third_party)
     if(MSVC)
         target_compile_options(TFUITest PRIVATE /utf-8 /MP)

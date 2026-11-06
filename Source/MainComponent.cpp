@@ -16,7 +16,7 @@ MainComponent::MainComponent (juce::PropertiesFile& p, std::function<void (Audio
 
     if (configureDevices) configureDevices (engine);
     auto saved = props.getXmlValue ("audioDevice");
-    engine.initialise (saved.get());
+    engine.initialise (saved.get(), props.getValue ("micDevice"));
     applySavedAudioSettings (engine, props);
     engine.addChangeListener (this);
 
@@ -50,6 +50,7 @@ MainComponent::MainComponent (juce::PropertiesFile& p, std::function<void (Audio
     studio.toast = [this] (const juce::String& t) { showToast (t); };
     library.toast = studio.toast;
     studio.onOpenLibrary = [this] { showPage (1); };
+    studio.onOpenSettings = [this] { showSettings(); };
     library.onSing = [this] (const juce::File& f) { showPage (0); studio.openSong (f); };
     library.onOpenProject = [this] (const juce::File& f) { showPage (0); studio.openProject (f); };
     library.onNewProject = [this] { showPage (0); studio.resetProject(); };

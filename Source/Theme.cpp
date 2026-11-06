@@ -78,6 +78,9 @@ namespace icons
     juce::Path mic()          { return svg ("M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v3"); }
     juce::Path speaker()      { return svg ("M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14"); }
     juce::Path speakerOff()   { return svg ("M11 5L6 9H2v6h4l5 4z M22 9l-6 6 M16 9l6 6"); }
+    juce::Path camera()       { return svg ("M23 7l-7 5 7 5z M3 5h11a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"); }
+    juce::Path update()       { return svg ("M12 3v12 M7 10l5 5 5-5 M4 19h16"); }
+    juce::Path video()        { return svg ("M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z M10 9l5 3-5 3z"); }
     juce::Path scissors()     { return svg ("M6 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M6 15a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M20 4L8.1 15.9 M14.5 14.5L20 20 M8.1 8.1L12 12"); }
     juce::Path undo()         { return svg ("M9 14L4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-3"); }
     juce::Path redo()         { return svg ("M15 14l5-5-5-5 M20 9H9a5 5 0 0 0 0 10h3"); }

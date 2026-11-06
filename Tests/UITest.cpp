@@ -5,6 +5,7 @@
 #include "MainComponent.h"
 #include "Settings.h"
 #include "FakeDevice.h"
+#include "MixTools.h"
 #include "InspectorContent.h"
 #include <juce_events/juce_events.h>
 
@@ -77,6 +78,7 @@ int UITest::run()
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);
     juce::PropertiesFile::Options po; po.storageFormat = juce::PropertiesFile::storeAsXML;
     auto props = std::make_unique<juce::PropertiesFile> (tmp.getChildFile ("settings.xml"), po);
+    props->setValue ("countIn", false);   // the count-in has its own check; other checks record at once
 
     auto song = tmp.getChildFile ("UI Test Song.wav");
     makeSong (song, 14.0);
@@ -219,6 +221,33 @@ int UITest::run()
         mc->keyPressed (juce::KeyPress (juce::KeyPress::spaceKey));
         pump (100);
         CHECK (played && ! engine.isPlaying() && engine.getPosition() > 4.2, "Space plays from there and Space again pauses (at " + juce::String (engine.getPosition(), 2) + " s)");
+    }
+
+    // ------------------------------------------------------------------ 13a. count-in, mic level, live pitch
+    std::cout << "\n13a. Count-in, mic level bar, live pitch\n";
+    {
+        tl.selectTrack (voiceId());
+        engine.setPosition (1.0);
+        props->setValue ("countIn", true);
+        click (studio.recBtn);
+        pump (200);
+        CHECK (studio.isCountingIn() && ! engine.isRecording(), "3-2-1 count-in before recording");
+        CHECK (waitFor ([&] { return engine.isRecording(); }, 4500), "recording starts after the count");
+        dev->extraNoise = 0.15f;   // the "voice"
+        pump (1200);
+        CHECK (studio.inMeter.verdict() >= 0, "the mic level bar shows the voice level while recording");
+        dev->extraNoise = 0.0f;
+        click (studio.recBtn);
+        waitFor ([&] { return ! engine.isRecording(); }, 3000);
+        pump (300);
+        click (tl.undoBtn);
+        // count-in can be cancelled
+        click (studio.recBtn);
+        pump (300);
+        click (studio.recBtn);
+        pump (3500);
+        CHECK (! engine.isRecording() && ! studio.isCountingIn(), "pressing record again during the count cancels it");
+        props->setValue ("countIn", false);
     }
 
     // ------------------------------------------------------------------ 13. record, then play: voice WITH music
@@ -557,6 +586,46 @@ int UITest::run()
         CHECK (! ff || two.size() == 2, "(ঙ) voice and music as two files at once");
         auto wav = runExport (6, {});
         CHECK (wav.size() == 1 && wav[0].endsWith (".wav"), "WAV (best quality)");
+
+        // "Save as": the file goes exactly where it was chosen, with fades and social-media loudness
+        auto runExportTo = [&] (int choice, ExportSettings st, const juce::File& dest) -> juce::StringArray
+        {
+            bool done = false;
+            studio.onExportsDone = [&] { done = true; };
+            studio.exportChoice (choice, {}, st, dest);
+            waitFor ([&] { return done; }, 180000);
+            studio.onExportsDone = nullptr;
+            if (! studio.exportErrors.isEmpty()) std::cout << "        error: " << studio.exportErrors.joinIntoString (" | ") << "\n";
+            return studio.exportedFiles;
+        };
+        ExportSettings es; es.fadeIn = 1.0; es.fadeOut = 2.0; es.normalise = true;
+        auto chosen = tmp.getChildFile (juce::String::fromUTF8 ("আমার ফোল্ডার")).getChildFile (juce::String::fromUTF8 ("আমার গান.wav"));
+        chosen.getParentDirectory().createDirectory();
+        auto saved = runExportTo (6, es, chosen);
+        CHECK (saved.size() == 1 && juce::File (saved[0]) == chosen && chosen.existsAsFile(), "saved exactly where it was chosen (save-as window)");
+        {
+            juce::AudioFormatManager fm; fm.registerBasicFormats();
+            if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (chosen) })
+            {
+                juce::AudioBuffer<float> b (2, (int) r->lengthInSamples);
+                r->read (&b, 0, b.getNumSamples(), 0, true, true);
+                const double l = mixtools::integratedLufs (b, b.getNumSamples(), r->sampleRate);
+                CHECK (std::abs (l + 14.0) < 1.0, "social-media loudness (" + juce::String (l, 1) + " LUFS, aim -14)");
+                const float head = b.getRMSLevel (0, 0, 480), tail = b.getRMSLevel (0, b.getNumSamples() - 480, 480), body = b.getRMSLevel (0, b.getNumSamples() / 2, 48000);
+                CHECK (head < body * 0.05f && tail < body * 0.05f, "fade in and fade out");
+                float pk = 0; for (int ch = 0; ch < 2; ++ch) pk = juce::jmax (pk, b.getMagnitude (ch, 0, b.getNumSamples()));
+                CHECK (pk <= 0.9f, "no clipping after the loudness boost (peak " + juce::String (juce::Decibels::gainToDecibels (pk), 1) + " dBFS)");
+            }
+        }
+        if (ff)
+        {
+            auto reel = tmp.getChildFile ("reel.mp4");
+            auto tall = runExportTo (9, es, reel);
+            auto pi = media::probe (reel);
+            CHECK (tall.size() == 1 && pi.hasVideo && pi.width == 720 && pi.height == 1280, "tall 9:16 video for Reels/Shorts (" + juce::String (pi.width) + "x" + juce::String (pi.height) + ")");
+            reel.deleteFile();
+        }
+        chosen.deleteFile();
         // the voice-only file really holds only the voice: it is silent where no voice was recorded
         if (ff && voice.size() == 1 && music.size() == 1)
         {

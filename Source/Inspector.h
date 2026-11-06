@@ -95,7 +95,8 @@ public:
 
     void showTrack (const juce::String& trackId);
     juce::String getTrack() const { return trackId; }
-    void updateMeters();
+    /** micPeak: the microphone level since the last call (read once by the studio for all its meters). */
+    void updateMeters (float micPeak);
     bool isBusy() const { return busy.load(); }
 
     std::function<void (const juce::String&)> toast;

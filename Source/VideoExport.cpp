@@ -35,7 +35,7 @@ void drawLyricsFrame (juce::Graphics& g, const Options& o, double t, juce::TextL
     const auto W = (float) o.width, H = (float) o.height;
     g.setGradientFill (juce::ColourGradient (juce::Colour (0xff14171D), 0, 0, juce::Colour (0xff0B0D11), 0, H, false));
     g.fillAll();
-    const float scale = H / 720.0f;
+    const float scale = juce::jmin (W, H) / 720.0f;   // the same text size for wide and tall (Reels) videos
 
     // title (small, top)
     g.setColour (col::muted);
@@ -85,7 +85,7 @@ void drawLyricsFrame (juce::Graphics& g, const Options& o, double t, juce::TextL
     else
     {
         // scrolling text, same pace as the teleprompter on screen
-        const float fs = 46.0f * scale, w = W - 160.0f;
+        const float fs = 46.0f * scale, w = W - 160.0f * scale;
         if (std::abs (cacheWidth - w) > 0.5f)
         {
             juce::AttributedString as;
@@ -104,7 +104,7 @@ void drawLyricsFrame (juce::Graphics& g, const Options& o, double t, juce::TextL
         const float scroll = (float) (t - o.lyricsOffset) * pps;
         g.setColour (col::accent.withAlpha (0.08f));
         g.fillRoundedRectangle (40.0f * scale, readY - fs * 0.25f, W - 80.0f * scale, fs * 1.55f, 14.0f * scale);
-        cache.draw (g, juce::Rectangle<float> (80.0f, readY - scroll, w, cache.getHeight()));
+        cache.draw (g, juce::Rectangle<float> (80.0f * scale, readY - scroll, w, cache.getHeight()));
         auto fade = [&] (float y0, float y1, bool down)
         {
             g.setGradientFill (juce::ColourGradient (juce::Colour (0xff12141A).withAlpha (down ? 1.0f : 0.0f), 0, y0,
@@ -116,6 +116,66 @@ void drawLyricsFrame (juce::Graphics& g, const Options& o, double t, juce::TextL
         g.setColour (col::muted);
         g.setFont (font (22.0f * scale, Weight::medium));
         g.drawText (o.title, juce::Rectangle<float> (0, 24.0f * scale, W, 34.0f * scale), juce::Justification::centred, true);
+    }
+}
+
+void drawLyricsOverlay (juce::Graphics& g, const Options& o, double t, int width, int stripH, bool opaque)
+{
+    const auto W = (float) width, H = (float) stripH;
+    if (opaque) g.fillAll (juce::Colour (0xff0E1014));
+    else
+    {
+        g.setGradientFill (juce::ColourGradient (juce::Colour (0xff0B0D11).withAlpha (0.0f), 0, 0, juce::Colour (0xff0B0D11).withAlpha (0.88f), 0, H * 0.55f, false));
+        g.fillAll();
+    }
+    const float scale = juce::jmin ((float) o.width, (float) o.height) / 720.0f;
+    const auto& lyr = o.lyrics;
+    double song = o.state.musicTrack() != nullptr ? o.state.musicTimeAt (t) : t;
+    song -= o.lyricsOffset;
+    juce::StringArray rows;
+    int cur = 0;
+    double prog = 0.0;
+    if (lyr.isEmpty()) rows.add (o.title);
+    else if (lyr.timed && o.state.musicTrack() != nullptr)
+    {
+        const int idx = lyr.indexAt (song);
+        cur = juce::jmax (0, idx);
+        double songLen = 0.0;
+        if (auto* m = o.state.musicTrack()) for (auto& c : m->clips) songLen = juce::jmax (songLen, c.out * m->speed);
+        prog = idx >= 0 ? lyr.progressAt (idx, song, songLen) : 0.0;
+        for (int k = cur; k <= cur + 1; ++k) rows.add (juce::isPositiveAndBelow (k, lyr.lines.size()) ? lyr.lines.getReference (k).text : juce::String());
+    }
+    else
+    {
+        // plain lyrics: move through the lines at the song's pace
+        const double len = juce::jmax (30.0, o.state.length() * 0.92);
+        cur = juce::jlimit (0, lyr.lines.size() - 1, (int) (juce::jmax (0.0, t - o.lyricsOffset) / len * lyr.lines.size()));
+        for (int k = cur; k <= cur + 1; ++k) rows.add (juce::isPositiveAndBelow (k, lyr.lines.size()) ? lyr.lines.getReference (k).text : juce::String());
+    }
+    const float cy = opaque ? H * 0.42f : H * 0.58f;
+    for (int i = 0; i < rows.size(); ++i)
+    {
+        auto text = rows[i];
+        if (text.isEmpty()) continue;
+        const bool now = i == 0;
+        auto f = font ((now ? 46.0f : 32.0f) * scale, now ? Weight::semibold : Weight::regular);
+        float w = juce::GlyphArrangement::getStringWidth (f, text);
+        const float maxW = W - 60.0f * scale;
+        if (w > maxW) { f = f.withHeight (f.getHeight() * maxW / w); w = maxW; }
+        juce::Rectangle<float> r (0, cy + (float) i * 64.0f * scale - 32.0f * scale, W, 64.0f * scale);
+        g.setFont (f);
+        // a soft shadow keeps the words readable over any camera picture
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        g.drawText (text, r.translated (0.0f, 2.0f * scale), juce::Justification::centred, false);
+        g.setColour (now ? col::ink : col::muted);
+        g.drawText (text, r, juce::Justification::centred, false);
+        if (now && prog > 0.0)
+        {
+            juce::Graphics::ScopedSaveState ss (g);
+            g.reduceClipRegion (juce::Rectangle<float> (W * 0.5f - w * 0.5f - 2.0f, r.getY(), (float) (w * prog) + 2.0f, r.getHeight()).toNearestInt());
+            g.setColour (col::accent);
+            g.drawText (text, r, juce::Justification::centred, false);
+        }
     }
 }
 
@@ -132,7 +192,53 @@ juce::String render (const Options& o, std::function<void (float)> progress, std
     juce::String err;
 
     auto* m = o.state.musicTrack();
-    if (o.useSourceVideo && m != nullptr && media::isVideo (m->source) && ! m->clips.isEmpty() && media::probe (m->source).hasVideo)
+    const bool vertical = o.height > o.width;
+    if (o.camera.existsAsFile())
+    {
+        // the singers on camera, the lyrics as a strip over / under the picture
+        const int W = o.width, H = o.height;
+        const int camH = vertical ? (int) std::lround (H * 0.70) / 2 * 2 : H;
+        const int stripH = vertical ? H - camH : (int) std::lround (H * 0.36);
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("TFVS-cam-" + juce::String (juce::Time::currentTimeMillis()));
+        dir.createDirectory();
+        const int frames = juce::jmax (1, (int) std::ceil (o.length * o.fps));
+        juce::Image img (juce::Image::ARGB, W, stripH, true, juce::SoftwareImageType());
+        juce::PNGImageFormat png;
+        for (int i = 0; i < frames && err.isEmpty(); ++i)
+        {
+            if (cancel.load()) err = u8 ("বাতিল করা হয়েছে।");
+            img.clear (img.getBounds());
+            {
+                juce::Graphics g (img);
+                drawLyricsOverlay (g, o, o.rangeStart + (double) i / o.fps, W, stripH, vertical);
+            }
+            juce::FileOutputStream fos (dir.getChildFile ("o" + juce::String (i).paddedLeft ('0', 6) + ".png"));
+            if (! fos.openedOk() || ! png.writeImageToStream (img, fos)) err = u8 ("ভিডিওর ছবি লেখা যায়নি — ডিস্কে জায়গা আছে কিনা দেখুন।");
+            if (progress && (i % 25) == 0) progress (0.6f * (float) i / (float) frames);
+        }
+        if (err.isEmpty())
+        {
+            const double d = o.cameraStart - o.rangeStart;   // > 0: the camera starts later than the video
+            juce::String vf = "[0:v]setpts=PTS-STARTPTS";
+            if (d < -0.0005) vf << ",trim=start=" << juce::String (-d, 3) << ",setpts=PTS-STARTPTS";
+            if (d > 0.0005) vf << ",tpad=start_duration=" << juce::String (d, 3) << ":color=0x0E1014";
+            vf << ",tpad=stop_mode=clone:stop_duration=3600,fps=" << o.fps
+               << ",scale=" << W << ":" << camH << ":force_original_aspect_ratio=increase,crop=" << W << ":" << camH
+               << ",pad=" << W << ":" << H << ":0:0:color=0x0E1014[cam];"
+               << "[cam][1:v]overlay=0:" << (H - stripH) << ":format=auto,format=yuv420p[v]";
+            err = runFfmpeg ({ exe.getFullPathName(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                               "-i", o.camera.getFullPathName(),
+                               "-framerate", juce::String (o.fps), "-i", dir.getChildFile ("o%06d.png").getFullPathName(),
+                               "-i", o.mixWav.getFullPathName(),
+                               "-filter_complex", vf, "-map", "[v]", "-map", "2:a",
+                               "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-c:a", "aac", "-b:a", "256k",
+                               "-t", juce::String (o.length, 3), "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+                               tmpOut.getFullPathName() },
+                             o.length, progress, 0.6f, 1.0f, cancel);
+        }
+        dir.deleteRecursively();
+    }
+    else if (o.useSourceVideo && m != nullptr && media::isVideo (m->source) && ! m->clips.isEmpty() && media::probe (m->source).hasVideo)
     {
         // the singer sees the song's own video: use it, in step with the music clip and its speed
         auto c = m->clips.getReference (0);
@@ -141,7 +247,14 @@ juce::String render (const Options& o, std::function<void (float)> progress, std
         const double from = (c.in + juce::jmax (0.0, o.rangeStart - c.start)) * m->speed;   // song seconds
         juce::String vf = "[0:v]trim=start=" + juce::String (from, 3) + ",setpts=(PTS-STARTPTS)/" + juce::String (m->speed, 4);
         if (pad > 0.0005) vf << ",tpad=start_duration=" << juce::String (pad, 3) << ":color=black";
-        vf << "," << common << "[v]";
+        if (vertical)
+        {
+            // tall video: the song's video in the middle, a blurred, enlarged copy fills the rest
+            vf << ",fps=" << o.fps << ",split[a][b];[a]scale=" << size << ":force_original_aspect_ratio=increase,crop=" << size
+               << ",boxblur=24:2,eq=brightness=-0.15[bg];[b]scale=" << size << ":force_original_aspect_ratio=decrease[fg];"
+               << "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]";
+        }
+        else vf << "," << common << "[v]";
         err = runFfmpeg ({ exe.getFullPathName(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
                            "-i", m->source.getFullPathName(), "-i", o.mixWav.getFullPathName(),
                            "-filter_complex", vf, "-map", "[v]", "-map", "1:a",

@@ -312,10 +312,10 @@ void Inspector::timerCallback()
     if (fxPending && ! content->dragging && ++pendingTicks >= 3) commitFx();
 }
 
-void Inspector::updateMeters()
+void Inspector::updateMeters (float micPeak)
 {
     if (track() != nullptr) content->meter.setLevel (engine.popTrackPeak (trackId));
-    if (content->micMeter.isShowing()) content->micMeter.setLevel (engine.popInputPeak());
+    if (content->micMeter.isShowing()) content->micMeter.setLevel (micPeak);
 }
 
 void Inspector::layout()

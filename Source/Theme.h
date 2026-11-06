@@ -70,6 +70,9 @@ namespace icons
     juce::Path speaker();
     juce::Path speakerOff();
     juce::Path scissors();
+    juce::Path camera();
+    juce::Path update();
+    juce::Path video();
     juce::Path undo();
     juce::Path redo();
     juce::Path loop();

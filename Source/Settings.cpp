@@ -1,4 +1,6 @@
 #include "Settings.h"
+#include "Camera.h"
+#include "Inspector.h"
 
 namespace tf
 {
@@ -17,7 +19,7 @@ class SettingsPanel : public juce::Component, private juce::Timer, private juce:
 public:
     SettingsPanel (AudioEngine& e, juce::PropertiesFile& p)
         : engine (e), props (p),
-          selector (e.getDeviceManager(), 1, 2, 2, 2, false, false, false, false),
+          selector (e.getDeviceManager(), e.isMicSeparate() ? 0 : 1, e.isMicSeparate() ? 0 : 2, 2, 2, false, false, false, false),
           offset (u8 ("রেকর্ডিং সিঙ্ক (কণ্ঠ আগে/পরে)"), -150, 150, e.getUserOffsetMs(),
                   [] (double v) { auto i = (int) std::round (v); return (i > 0 ? "+" : "") + bn (i) + " ms"; }),
           preroll (u8 ("\"এই অংশ আবার গাই\" — আগে কত সেকেন্ড শোনাবে"), 0, 5, p.getDoubleValue ("preroll", 2.0),
@@ -40,6 +42,65 @@ public:
         preroll.slider.setRange (0.0, 5.0, 0.5);
         preroll.onChange = [this] (double v) { engine.setPrerollSeconds (v); props.setValue ("preroll", v); };
 
+        // microphone (its own stream, any sound card) and camera
+        micBox.setWantsKeyboardFocus (false);
+        refreshMics();
+        micBox.onChange = [this]
+        {
+            const auto name = micBox.getText();
+            if (name.isEmpty() || name == engine.getMicrophone()) return;
+            engine.setMicrophone (name);
+            props.setValue ("micDevice", name);
+        };
+        addChildComponent (micBox);
+        camBox.setWantsKeyboardFocus (false);
+        camBox.addItem (u8 ("ক্যামেরা নেই"), 1);
+        {
+            auto cams = camera::devices();
+            for (int i = 0; i < cams.size(); ++i) camBox.addItem (cams[i], 2 + i);
+            const auto cur = props.getValue ("camera");
+            camBox.setSelectedId (cur.isEmpty() || ! cams.contains (cur) ? 1 : 2 + cams.indexOf (cur), juce::dontSendNotification);
+        }
+        camBox.onChange = [this] { props.setValue ("camera", camBox.getSelectedId() > 1 ? camBox.getText() : juce::String()); camPicture = {}; repaint(); };
+        addChildComponent (camBox);
+        camTest.onClick = [this]
+        {
+            juce::String err;
+            camPicture = camBox.getSelectedId() > 1 ? camera::snapshot (camBox.getText(), err) : juce::Image();
+            camError = err;
+            repaint();
+        };
+        addChildComponent (camTest);
+
+        // recording aids
+        countIn.sw.setToggleState (p.getBoolValue ("countIn", true), juce::dontSendNotification);
+        countIn.sw.onClick = [this] { props.setValue ("countIn", countIn.sw.getToggleState()); };
+        addChildComponent (countIn);
+        measureBtn.setIcon (icons::wand(), false, 16.0f);
+        measureBtn.onClick = [this]
+        {
+            measureText = u8 ("মাপা হচ্ছে… স্পিকার থেকে ৪টি ছোট \"টিক\" শব্দ হবে, চুপ থাকুন।");
+            measureBtn.setEnabled (false);
+            repaint();
+            juce::Component::SafePointer<SettingsPanel> safe (this);
+            engine.measureLatency ([safe] (bool ok, double ms, juce::String msg)
+            {
+                if (safe == nullptr) return;
+                safe->measureBtn.setEnabled (true);
+                if (ok)
+                {
+                    safe->offset.slider.setValue (safe->engine.getUserOffsetMs(), juce::sendNotificationSync);
+                    safe->measureText = u8 ("মাপা হয়েছে: মোট দেরি ") + bn ((int) std::round (ms)) + u8 (" ms — রেকর্ডিং এখন নিজে থেকে মিলবে।");
+                }
+                else safe->measureText = msg;
+                safe->repaint();
+            });
+        };
+        addChildComponent (measureBtn);
+        camOffset.slider.setRange (-300.0, 300.0, 10.0);
+        camOffset.onChange = [this] (double v) { props.setValue ("camOffsetMs", v); };
+        addChildComponent (camOffset);
+
         toneBtn.setIcon (icons::speaker(), false, 17.0f);
         toneBtn.onClick = [this] { engine.playTestTone(); };
         addChildComponent (toneBtn);
@@ -49,7 +110,8 @@ public:
         engine.addChangeListener (this);
         show (0);
         startTimerHz (4);
-        setSize (700, 660);
+        camOffset.slider.setValue (p.getDoubleValue ("camOffsetMs", 0.0), juce::dontSendNotification);
+        setSize (720, 720);
     }
 
     ~SettingsPanel() override { engine.removeChangeListener (this); }
@@ -61,9 +123,15 @@ public:
         tabRecord.setSelected (p == 1);
         tabCheck.setSelected (p == 2);
         selector.setVisible (p == 0);
+        micBox.setVisible (p == 0 && engine.isMicSeparate());
+        camBox.setVisible (p == 0);
+        camTest.setVisible (p == 0);
         offset.setVisible (p == 1);
         preroll.setVisible (p == 1);
         resetBtn.setVisible (p == 1);
+        countIn.setVisible (p == 1);
+        measureBtn.setVisible (p == 1);
+        camOffset.setVisible (p == 1);
         toneBtn.setVisible (p == 2);
         resized();
         repaint();
@@ -92,17 +160,29 @@ public:
 
         if (page == 0)
         {
-            heading (u8 ("মাইক ও স্পিকার"), u8 ("FIFINE বা অন্য USB মাইক এখানে Input-এ বাছুন। সবচেয়ে কম দেরির জন্য \"Windows Audio (Low Latency Mode)\" রাখুন।"));
+            heading (u8 ("মাইক, স্পিকার ও ক্যামেরা"), u8 ("মাইক আলাদা সাউন্ড কার্ডে (যেমন FIFINE USB মাইক) থাকলেও কোনো সমস্যা নেই — আওয়াজ ভাঙবে না। সবচেয়ে কম দেরির জন্য \"Windows Audio (Low Latency Mode)\" রাখুন।"));
+            auto label = [&g] (const juce::String& t, juce::Rectangle<int> r)
+            {
+                g.setColour (col::inkSoft); g.setFont (font (14.5f));
+                g.drawText (t, r.withWidth (150), juce::Justification::centredLeft);
+            };
+            if (micBox.isVisible()) label (u8 ("মাইক"), micBox.getBounds().withX (body.getX() + 24));
+            label (u8 ("ক্যামেরা"), camBox.getBounds().withX (body.getX() + 24));
+            if (camPicture.isValid())
+                g.drawImage (camPicture, camPreview.toFloat(), juce::RectanglePlacement::centred);
+            else if (camError.isNotEmpty())
+            {
+                g.setColour (col::warn); g.setFont (font (13.0f));
+                g.drawFittedText (camError, camPreview, juce::Justification::centred, 3);
+            }
         }
         else if (page == 1)
         {
             heading (u8 ("রেকর্ডিং ও সিঙ্ক"), u8 ("রেকর্ড করা কণ্ঠ মিউজিকের চেয়ে পিছিয়ে শোনালে সিঙ্ক বাড়ান (+), এগিয়ে শোনালে কমান (−)। সাধারণত ০ রাখলেই ঠিক থাকে।"));
-            auto note = offset.getBounds().getUnion (preroll.getBounds()).withY (preroll.getBottom() + 70).withHeight (120);
-            g.setColour (col::dim); g.setFont (font (13.0f));
-            g.drawFittedText (u8 ("সফটওয়্যার নিজেই মাইক ও স্পিকারের দেরি (latency) মেপে রেকর্ডিং মিলিয়ে নেয়। "
-                                  "AI নয়েজ রিমুভ চালু থাকলে তার ১০ ms দেরিও নিজে থেকে বাদ দেয়। "
-                                  "তবুও কোনো সাউন্ড কার্ডে ঠিক না মিললে এখান থেকে একবার ঠিক করে দিন — পরের সব রেকর্ডিংয়ে কাজে লাগবে।"),
-                              note, juce::Justification::topLeft, 6, 1.0f);
+            g.setColour (measureText.isNotEmpty() ? col::okText : col::dim); g.setFont (font (13.0f));
+            g.drawFittedText (measureText.isNotEmpty() ? measureText
+                                                       : u8 ("\"সিঙ্ক মাপুন\" চাপলে সফটওয়্যার নিজেই স্পিকার আর মাইকের দেরি মেপে রেকর্ডিং মিলিয়ে নেবে (মাইক স্পিকারের কাছে রাখুন)।"),
+                              measureNote, juce::Justification::topLeft, 3, 1.0f);
         }
         else
         {
@@ -154,12 +234,28 @@ public:
         body = r;
 
         auto in = body.reduced (20, 20).withTrimmedTop (78);
-        selector.setBounds (in.withTrimmedLeft (-8));
+        {
+            auto d = in;
+            if (engine.isMicSeparate()) { micBox.setBounds (d.removeFromTop (34).withTrimmedLeft (150)); d.removeFromTop (8); }
+            auto camRow = d.removeFromBottom (34);
+            camTest.setBounds (camRow.removeFromRight (150));
+            camRow.removeFromRight (8);
+            camBox.setBounds (camRow.withTrimmedLeft (150));
+            d.removeFromBottom (8);
+            camPreview = d.removeFromBottom (camPicture.isValid() || camError.isNotEmpty() ? 110 : 0).withTrimmedLeft (150);
+            selector.setBounds (d.withTrimmedLeft (-8));
+        }
         auto rr = in.withTrimmedLeft (4).withTrimmedRight (4);
+        auto mrow = rr.removeFromTop (40);
+        measureBtn.setBounds (mrow.removeFromLeft (220));
+        measureNote = rr.removeFromTop (44).withTrimmedTop (4);
         offset.setBounds (rr.removeFromTop (52));
         resetBtn.setBounds (rr.removeFromTop (44).removeFromRight (150).withSizeKeepingCentre (150, 36));
-        rr.removeFromTop (18);
         preroll.setBounds (rr.removeFromTop (52));
+        rr.removeFromTop (6);
+        countIn.setBounds (rr.removeFromTop (44));
+        rr.removeFromTop (6);
+        camOffset.setBounds (rr.removeFromTop (52));
         toneBtn.setBounds (juce::Rectangle<int> (200, 44).withPosition (body.getX() + 24, body.getBottom() - 70));
     }
 
@@ -175,9 +271,24 @@ private:
              tabCheck  { u8 ("পরীক্ষা"), TFButton::Style::segment },
              toneBtn   { u8 ("স্পিকার পরীক্ষা") },
              resetBtn  { u8 ("০ তে ফেরান") };
-    juce::Rectangle<int> tabWell, body;
+    juce::Rectangle<int> tabWell, body, camPreview, measureNote;
     juce::AudioDeviceSelectorComponent selector;
     LabeledSlider offset, preroll;
+    juce::ComboBox micBox, camBox;
+    TFButton camTest { u8 ("ক্যামেরা দেখুন") }, measureBtn { u8 ("সিঙ্ক নিজে থেকে মাপুন"), TFButton::Style::accent };
+    juce::Image camPicture;
+    juce::String camError, measureText;
+    SwitchRow countIn { u8 ("রেকর্ডের আগে ৩-২-১ গণনা"), u8 ("রেকর্ড চাপলে ৩ সেকেন্ড গুনে তারপর শুরু হয়") };
+    LabeledSlider camOffset { u8 ("ক্যামেরার ভিডিও আগে/পরে"), -300, 300, 0, [] (double v) { auto i = (int) std::round (v); return (i > 0 ? "+" : "") + bn (i) + " ms"; } };
+
+    void refreshMics()
+    {
+        micBox.clear (juce::dontSendNotification);
+        auto names = engine.getMicrophoneNames();
+        for (int i = 0; i < names.size(); ++i) micBox.addItem (names[i], i + 1);
+        const int idx = names.indexOf (engine.getMicrophone());
+        if (idx >= 0) micBox.setSelectedId (idx + 1, juce::dontSendNotification);
+    }
 };
 
 void showAudioSettings (juce::Component* centreAround, AudioEngine& e, juce::PropertiesFile& p)

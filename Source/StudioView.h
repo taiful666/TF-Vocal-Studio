@@ -7,6 +7,8 @@
 #include "Media.h"
 #include "Timeline.h"
 #include "Inspector.h"
+#include "RecordAids.h"
+#include "Camera.h"
 
 namespace tf
 {
@@ -113,6 +115,10 @@ private:
              cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool },
              fromFile { juce::String::fromUTF8 ("ফাইল থেকে আনুন"), TFButton::Style::tool };
     std::unique_ptr<juce::FileChooser> chooser;
+    camera::Recorder camRec;
+    bool cameraOn = false;
+    juce::File pendingCamera;
+    TFButton camBtn { juce::String::fromUTF8 ("ক্যামেরা") };
     friend struct UITest;
 };
 
@@ -134,6 +140,10 @@ private:
     float progress = 0.0f, phase = 0.0f;
     TFButton cancel { juce::String::fromUTF8 ("বাতিল"), TFButton::Style::tool };
 };
+
+//==============================================================================
+/** How a file is saved: fades, loudness, tall video, camera. */
+struct ExportSettings { double fadeIn = 0.0, fadeOut = 0.0; bool normalise = true, vertical = false, camera = true; };
 
 //==============================================================================
 class StudioView : public juce::Component,
@@ -158,6 +168,7 @@ public:
     bool projectHasContent() const;
     void togglePlay();
     void toggleRecord();
+    bool isCountingIn() const { return countIn.isCounting(); }
     void goToStart();
     void chooseFile (bool video = false);
     void undo()  { if (! engine.isRecording()) project.undo(); }
@@ -170,6 +181,7 @@ public:
     Project& getProject() { return project; }
 
     std::function<void()> onOpenLibrary;
+    std::function<void()> onOpenSettings;
     friend struct UITest;
     std::function<void (const juce::String&)> toast;
 
@@ -191,12 +203,20 @@ private:
     void projectChanged();
     void updateTransportButtons();
     void updateToolbar();
-    void showSaveMenu();
     void showAddMenu();
     void exportRange (juce::Range<double> range, bool mp3);
     enum class ExportFormat { mp3, wav, mp4 };
-    struct ExportJob { ProjectState state; juce::Range<double> range; ExportFormat format; juce::String suffix; };
-    void exportChoice (int menuItem, juce::Range<double> selection);
+    struct ExportJob
+    {
+        ProjectState state; juce::Range<double> range; ExportFormat format; juce::String suffix;
+        juce::File dest;                // where to save (empty: the Exports folder)
+        ExportSettings settings;
+    };
+    /** choice: 1 video (wide), 9 video (tall, Reels), 2 whole song MP3, 3 voice only, 4 music only,
+        5 voice + music as two files, 6 WAV, 7 selected part MP3. dest: file chosen in the save window. */
+    void exportChoice (int choice, juce::Range<double> selection, ExportSettings settings = {}, juce::File dest = {});
+    void showExportPanel();
+    juce::File cameraFor (const ProjectState&, juce::Range<double>, double& cameraStart) const;
     void startExports (std::vector<ExportJob>);
     void runNextExport();
     void exportFinished();
@@ -209,6 +229,7 @@ private:
     void saveLyrics (const juce::String& text);
     juce::String recordTrack();
     void startRedoPart (const juce::String& trackId, juce::Range<double> range);
+    void startRecordingNow();
     void singWithoutMusic();
     void consumeRecording();
     void updateNoiseButton();
@@ -219,7 +240,7 @@ private:
     Project project;
     Lyrics lyrics;
 
-    juce::Rectangle<int> stageCard, transportCard, timeArea, headArea, meterArea, splitterArea;
+    juce::Rectangle<int> stageCard, transportCard, timeArea, headArea, splitterArea;
     int timelineHeight = -1, dragStartHeight = 0;
     bool draggingSplitter = false;
     LyricsView stage { engine, project, props };
@@ -241,14 +262,23 @@ private:
              playBtn { juce::String::fromUTF8 ("চালান"), TFButton::Style::primary },
              recBtn { juce::String::fromUTF8 ("রেকর্ড"), TFButton::Style::record },
              saveBtn { juce::String::fromUTF8 ("সেভ / এক্সপোর্ট") };
-    LevelMeter masterL, masterR;
+    InputMeter inMeter;
+    PitchMeter pitchMeter;
+    CountIn countIn { engine };
 
     std::unique_ptr<juce::FileChooser> chooser;
+    camera::Recorder camRec;
+    bool cameraOn = false;
+    juce::File pendingCamera;
+    TFButton camBtn { juce::String::fromUTF8 ("ক্যামেরা") };
     float exportProgress = -1.0f;
     std::vector<ExportJob> exportQueue;
     juce::StringArray exportedFiles, exportErrors;
 public:
     std::function<void()> onExportsDone;   // for the automated test
+    // camera (singers on video)
+    void setCameraEnabled (bool on);
+    bool isCameraEnabled() const { return cameraOn; }
     bool revealAfterExport = true;
 private:
     bool wasPlaying = false, wasRecording = false;

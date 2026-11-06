@@ -536,10 +536,11 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     recBtn.setRadius (16.0f);
     recBtn.setFontSize (16.0f);
     for (auto* b : { &toStartBtn, &stopBtn, &playBtn, &recBtn, &saveBtn }) addAndMakeVisible (b);
-    addAndMakeVisible (masterL);
-    addAndMakeVisible (masterR);
-    masterL.setTitle (u8 ("মাস্টার লেভেল বাম"));
-    masterR.setTitle (u8 ("মাস্টার লেভেল ডান"));
+    addAndMakeVisible (inMeter);
+    inMeter.setTitle (u8 ("মাইক লেভেল"));
+    addChildComponent (pitchMeter);
+    pitchMeter.setTooltip (u8 ("যে সুরে গাইছেন — সবুজ মানে ঠিক সুরে। পাশে সরগম (গানের স্কেল অনুযায়ী)"));
+    addChildComponent (countIn);
 
     // stage toolbar
     addBtn.setIcon (icons::plus(), false, 16.0f);
@@ -556,6 +557,14 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
         addChildComponent (b);
     }
     noiseBtn.setVisible (true);
+    camBtn.setIcon (icons::camera(), false, 16.0f);
+    camBtn.setRadius (9.0f);
+    camBtn.setFontSize (14.0f);
+    camBtn.setTooltip (u8 ("চালু থাকলে রেকর্ডের সময় ক্যামেরায় আপনাদের ভিডিও হবে — ভিডিও সেভ করলে মুখ আর লিরিক্স একসাথে"));
+    camBtn.onClick = [this] { setCameraEnabled (! cameraOn); };
+    addChildComponent (camBtn);
+    cameraOn = props.getBoolValue ("cameraOn", false) && props.getValue ("camera").isNotEmpty();
+    camBtn.setSelected (cameraOn);
     noiseBtn.setRadius (12.0f);
     lyricsBtn.onClick = [this] { showLyricsPanel(); };
     noiseBtn.onClick = [this] { inspector.cleanVoice (Inspector::CleanKind::noise, recordTrack()); };
@@ -565,7 +574,7 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
     stopBtn.onClick = [this] { engine.stop(); stage.resetScroll(); };
     playBtn.onClick = [this] { togglePlay(); };
     recBtn.onClick = [this] { toggleRecord(); };
-    saveBtn.onClick = [this] { showSaveMenu(); };
+    saveBtn.onClick = [this] { showExportPanel(); };
 
     // home options
     stage.addAudio.onClick = [this] { stage.setForceHome (false); chooseFile (false); };
@@ -613,7 +622,8 @@ StudioView::StudioView (AudioEngine& e, juce::PropertiesFile& p) : engine (e), p
                 for (auto& t : st.tracks) { t.solo = t.id == id; }
                 const auto i = st.indexOf (id);
                 const auto suffix = i >= 0 ? " (" + st.tracks.getReference (i).name + ")" : juce::String();
-                startExports ({ ExportJob { st, {}, ExportFormat::mp3, suffix } });
+                ExportJob j; j.state = st; j.format = ExportFormat::mp3; j.suffix = suffix;
+                startExports ({ j });
                 break;
             }
         }
@@ -993,6 +1003,7 @@ void StudioView::filesDropped (const juce::StringArray& files, int, int)
 //==============================================================================
 void StudioView::togglePlay()
 {
+    if (countIn.isCounting()) { countIn.cancel(); return; }
     if (engine.isRecording()) { engine.stopRecording(); return; }
     if (! engine.hasContent()) { if (toast) toast (u8 ("আগে মিউজিক দিন বা রেকর্ড করুন")); return; }
     engine.togglePlay();
@@ -1013,11 +1024,54 @@ void StudioView::toggleRecord()
 {
     if (importing.load()) return;
     if (engine.isRecording()) { engine.stopRecording(); return; }
+    if (countIn.isCounting()) { countIn.cancel(); return; }
     lyricsEditor.setVisible (false);
+    if (props.getBoolValue ("countIn", true))
+    {
+        countIn.toFront (false);
+        juce::Component::SafePointer<StudioView> safe (this);
+        countIn.start ([safe] { if (safe != nullptr) safe->startRecordingNow(); });
+        return;
+    }
+    startRecordingNow();
+}
+
+void StudioView::setCameraEnabled (bool on)
+{
+    if (engine.isRecording()) return;
+    if (on && props.getValue ("camera").isEmpty())
+    {
+        if (toast) toast (u8 ("আগে \"অডিও সেটিংস → ডিভাইস\" থেকে ক্যামেরা বাছুন (ফোন হলে DroidCam / Iriun দিয়ে USB-তে যুক্ত করুন)"));
+        if (onOpenSettings) onOpenSettings();
+        return;
+    }
+    cameraOn = on;
+    props.setValue ("cameraOn", on);
+    camBtn.setSelected (on);
+    if (toast) toast (on ? u8 ("ক্যামেরা চালু — রেকর্ডের সময় ভিডিও হবে") : u8 ("ক্যামেরা বন্ধ"));
+}
+
+void StudioView::startRecordingNow()
+{
+    if (engine.isRecording() || importing.load()) return;
     const auto id = recordTrack();
     engine.setArmedTrack (id);
+    pendingCamera = juce::File();
+    if (cameraOn && props.getValue ("camera").isNotEmpty())
+    {
+        auto f = AudioEngine::recordingsFolder().getChildFile ("camera " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".ts").getNonexistentSibling();
+        auto e = camRec.start (props.getValue ("camera"), f);
+        if (e.isEmpty()) pendingCamera = f;
+        else if (toast) toast (e);
+    }
     juce::String err;
-    if (! engine.startRecording (id, {}, err)) showError (err);
+    if (! engine.startRecording (id, {}, err))
+    {
+        camRec.stop();
+        pendingCamera.deleteFile();
+        pendingCamera = juce::File();
+        showError (err);
+    }
 }
 
 void StudioView::startRedoPart (const juce::String& trackId, juce::Range<double> range)
@@ -1072,9 +1126,27 @@ void StudioView::consumeRecording()
     // a finished recording goes onto its track
     auto res = engine.takeLastRecording();
     if (res.wav == juce::File()) return;
+    juce::File cam;
+    double camStart = 0.0;
+    if (camRec.isRecording())
+    {
+        const double wall = camRec.stop();
+        if (res.ok && ! res.punch && pendingCamera.existsAsFile() && pendingCamera.getSize() > 10000)
+        {
+            // the singer is seen at wall-clock time W singing the music heard at W: the music reached
+            // the speaker about half the round trip after the playhead, plus the camera's own delay
+            const double audioStartWall = (double) res.startedAt.toMilliseconds() / 1000.0;
+            const double firstSample = res.start - (res.in - (double) engine.getRoundTripLatencySamples() / juce::jmax (1.0, engine.getSampleRate()));
+            camStart = firstSample + (wall - audioStartWall) - engine.getRoundTripLatencyMs() / 2000.0
+                       - 0.06 + props.getDoubleValue ("camOffsetMs", 0.0) / 1000.0;
+            cam = pendingCamera;
+        }
+        else pendingCamera.deleteFile();
+        pendingCamera = juce::File();
+    }
     if (res.ok)
     {
-        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out, res.punch);
+        project.insertRecording (res.trackId, res.wav, res.start, res.in, res.out, res.punch, res.speaker, cam, camStart);
         if (toast) toast (u8 ("রেকর্ড হয়েছে — চালান চাপলে মিউজিকের সাথে শুনবেন"));
     }
     else if (toast) toast (u8 ("রেকর্ডিং খুব ছোট ছিল, রাখা হয়নি"));
@@ -1190,6 +1262,7 @@ void StudioView::updateTransportButtons()
     saveBtn.setEnabled (! rec && engine.hasContent() && exportProgress < 0.0f && ! engine.isExporting());
     toStartBtn.setEnabled (! rec);
     addBtn.setEnabled (! rec);
+    camBtn.setEnabled (! rec);
 }
 
 void StudioView::updateToolbar()
@@ -1208,9 +1281,11 @@ void StudioView::updateToolbar()
 
 void StudioView::timerCallback()
 {
-    inspector.updateMeters();
-    masterL.setLevel (engine.popOutputPeak());
-    masterR.setLevel (engine.popOutputPeakR());
+    const float micPeak = engine.popInputPeak();
+    inspector.updateMeters (micPeak);
+    inMeter.setLevel (micPeak);
+    juce::ignoreUnused (engine.popOutputPeak(), engine.popOutputPeakR());
+    if (pitchMeter.isVisible()) pitchMeter.setPitch (engine.getLivePitchHz(), engine.getEffectiveKey());
     repaint (timeArea);
 
     // a "sing this part again" take ends by itself at the end of the part
@@ -1229,45 +1304,215 @@ void StudioView::timerCallback()
 //==============================================================================
 // Export
 //==============================================================================
-void StudioView::showSaveMenu()
+//==============================================================================
+/** The save window: what to save, how it should sound/look, then where (a normal "Save as" window). */
+class ExportPanel : public juce::Component
+{
+public:
+    struct Format { int id; juce::String title, sub; };
+    ExportPanel (bool hasMusic, bool hasSelection, bool hasCamera, juce::PropertiesFile& p)
+        : props (p),
+          fadeIn (u8 ("শুরুতে ধীরে আসা (ফেড-ইন)"), 0, 5, p.getDoubleValue ("exFadeIn", 0.0), [] (double v) { return v < 0.05 ? u8 ("নেই") : bn (juce::String (v, 1)) + u8 (" সে."); }),
+          fadeOut (u8 ("শেষে ধীরে মিলিয়ে যাওয়া (ফেড-আউট)"), 0, 8, p.getDoubleValue ("exFadeOut", 2.0), [] (double v) { return v < 0.05 ? u8 ("নেই") : bn (juce::String (v, 1)) + u8 (" সে."); })
+    {
+        formats = { { 1, u8 ("ভিডিও MP4 — আড়াআড়ি"), u8 ("YouTube, Facebook (১৬:৯)") },
+                    { 9, u8 ("ভিডিও MP4 — খাড়া"), u8 ("Reels, Shorts, TikTok (৯:১৬)") },
+                    { 2, u8 ("পুরো গান MP3"), u8 ("মিউজিক + কণ্ঠ") },
+                    { 3, u8 ("শুধু কণ্ঠ MP3"), u8 ("ইফেক্টসহ") },
+                    { 4, u8 ("শুধু মিউজিক MP3"), {} },
+                    { 5, u8 ("কণ্ঠ আর মিউজিক আলাদা"), u8 ("দুটি MP3 ফাইল") },
+                    { 6, u8 ("পুরো গান WAV"), u8 ("সবচেয়ে ভালো মান") } };
+        for (auto& f : formats)
+        {
+            auto* b = buttons.add (new TFButton (f.title, TFButton::Style::segment));
+            b->setFontSize (14.0f);
+            b->setTooltip (f.sub);
+            b->setEnabled (hasMusic || (f.id != 4 && f.id != 5));
+            b->onClick = [this, id = f.id] { choose (id); };
+            addAndMakeVisible (b);
+        }
+        for (auto* s : { &fadeIn, &fadeOut }) { s->slider.setRange (s == &fadeIn ? 0.0 : 0.0, s == &fadeIn ? 5.0 : 8.0, 0.5); addAndMakeVisible (s); }
+        loud.sw.setToggleState (p.getBoolValue ("exLoud", true), juce::dontSendNotification);
+        cam.sw.setToggleState (hasCamera && p.getBoolValue ("exCamera", true), juce::dontSendNotification);
+        cam.sw.setEnabled (hasCamera);
+        if (! hasCamera) cam.setNote (u8 ("ক্যামেরা চালু করে রেকর্ড করলে এখানে আসবে"));
+        part.sw.setEnabled (hasSelection);
+        if (! hasSelection) part.setNote (u8 ("টাইমলাইনে টেনে অংশ বাছাই করলে চালু হবে"));
+        for (auto* r : { &loud, &cam, &part }) addAndMakeVisible (r);
+        save.setRadius (10.0f);
+        save.onClick = [this] { if (onSave) onSave (chosen, settings(), part.sw.getToggleState()); };
+        cancel.onClick = [this] { if (onCancel) onCancel(); };
+        folder.setIcon (icons::folder(), false, 16.0f);
+        folder.onClick = [this] { if (onFolder) onFolder(); };
+        for (auto* b : { &save, &cancel, &folder }) addAndMakeVisible (b);
+        choose (p.getIntValue ("exFormat", 1));
+        setSize (640, 640);
+    }
+
+    ExportSettings settings() const
+    {
+        ExportSettings s;
+        s.fadeIn = fadeIn.slider.getValue();
+        s.fadeOut = fadeOut.slider.getValue();
+        s.normalise = loud.sw.getToggleState();
+        s.vertical = chosen == 9;
+        s.camera = cam.sw.getToggleState();
+        props.setValue ("exFadeIn", s.fadeIn);
+        props.setValue ("exFadeOut", s.fadeOut);
+        props.setValue ("exLoud", s.normalise);
+        props.setValue ("exCamera", s.camera);
+        props.setValue ("exFormat", chosen);
+        return s;
+    }
+
+    void choose (int id)
+    {
+        bool found = false;
+        for (size_t i = 0; i < formats.size(); ++i) if (formats[i].id == id && buttons[(int) i]->isEnabled()) found = true;
+        chosen = found ? id : 2;
+        for (size_t i = 0; i < formats.size(); ++i) buttons[(int) i]->setSelected (formats[i].id == chosen);
+        const bool video = chosen == 1 || chosen == 9;
+        cam.setVisible (video);
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (col::bg);
+        auto r = getLocalBounds().reduced (24, 18);
+        g.setColour (col::ink); g.setFont (font (19.0f, Weight::semibold));
+        g.drawText (u8 ("কী সেভ করবেন?"), r.removeFromTop (30), juce::Justification::centredLeft);
+        g.setColour (col::muted); g.setFont (font (13.5f));
+        g.drawText (u8 ("ভলিউম, মিউট আর ইফেক্ট যেমন সেট করা, তেমনই থাকবে। সেভ চাপলে কোথায় রাখবেন বাছাই করবেন।"), r.removeFromTop (22), juce::Justification::centredLeft, true);
+        for (size_t i = 0; i < formats.size(); ++i)
+        {
+            auto b = buttons[(int) i]->getBounds();
+            g.setColour (col::dim); g.setFont (font (12.0f));
+            g.drawText (formats[i].sub, b.withY (b.getBottom() + 1).withHeight (16), juce::Justification::centred, true);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (24, 18);
+        r.removeFromTop (60);
+        const int cols = 2, w = (r.getWidth() - 12) / cols;
+        for (int i = 0; i < buttons.size(); ++i)
+        {
+            const int row = i / cols, c = i % cols;
+            buttons[i]->setBounds (r.getX() + c * (w + 12), r.getY() + row * 64, w, 42);
+        }
+        r.removeFromTop (((buttons.size() + 1) / cols) * 64 + 6);
+        fadeIn.setBounds (r.removeFromTop (52));
+        fadeOut.setBounds (r.removeFromTop (52));
+        loud.setBounds (r.removeFromTop (44));
+        part.setBounds (r.removeFromTop (44));
+        cam.setBounds (r.removeFromTop (44));
+        auto bottom = getLocalBounds().reduced (24, 18).removeFromBottom (44);
+        save.setBounds (bottom.removeFromRight (170));
+        bottom.removeFromRight (10);
+        cancel.setBounds (bottom.removeFromRight (100));
+        folder.setBounds (bottom.removeFromLeft (200));
+    }
+
+    std::function<void (int, ExportSettings, bool)> onSave;
+    std::function<void()> onCancel, onFolder;
+    juce::PropertiesFile& props;
+    std::vector<Format> formats;
+    juce::OwnedArray<TFButton> buttons;
+    int chosen = 1;
+    LabeledSlider fadeIn, fadeOut;
+    SwitchRow loud { u8 ("সোশ্যাল মিডিয়ার জোর (−১৪ LUFS)"), u8 ("YouTube/Facebook-এর মতো সমান জোর, কোথাও ফাটবে না") },
+              part { u8 ("শুধু বাছাই করা অংশ"), {} },
+              cam  { u8 ("ক্যামেরার ভিডিও দেখান"), u8 ("আপনাদের মুখ, নিচে লিরিক্স") };
+    TFButton save { u8 ("সেভ করুন…"), TFButton::Style::accent }, cancel { u8 ("বাতিল") }, folder { u8 ("সেভ করা ফাইলের ফোল্ডার") };
+};
+
+void StudioView::showExportPanel()
 {
     if (! engine.hasContent()) { if (toast) toast (u8 ("আগে কিছু রেকর্ড করুন")); return; }
+    if (engine.isExporting() || exportProgress >= 0.0f) return;
     const auto sel = timeline.getSelection();
-    const bool hasMusic = project.state().musicTrack() != nullptr;
-    juce::PopupMenu m;
-    m.addSectionHeader (u8 ("ভলিউম, মিউট আর ইফেক্ট যেমন সেট করা, তেমনই থাকবে"));
-    m.addItem (1, u8 ("ভিডিও (MP4) — লিরিক্স বা গানের ভিডিওসহ"));
-    m.addItem (2, u8 ("পুরো গান MP3 (মিউজিক + কণ্ঠ)"));
-    m.addItem (3, u8 ("শুধু কণ্ঠ MP3"));
-    m.addItem (4, u8 ("শুধু মিউজিক MP3"), hasMusic);
-    m.addItem (5, u8 ("কণ্ঠ আর মিউজিক আলাদা দুই ফাইলে (MP3)"), hasMusic);
-    m.addItem (6, u8 ("পুরো গান WAV (সবচেয়ে ভালো মান)"));
-    m.addSeparator();
-    m.addItem (7, u8 ("শুধু বাছাই করা অংশ MP3"), ! sel.isEmpty());
-    m.addItem (8, u8 ("সেভ করা ফাইলের ফোল্ডার খুলুন"));
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (saveBtn).withMinimumWidth (saveBtn.getWidth()),
-                     [this, sel] (int r)
+    double cs = 0.0;
+    const bool hasCam = cameraFor (project.state(), {}, cs) != juce::File();
+    auto panel = std::make_unique<ExportPanel> (project.state().musicTrack() != nullptr, ! sel.isEmpty(), hasCam, props);
+    auto* raw = panel.get();
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (panel.release());
+    o.dialogTitle = u8 ("সেভ / এক্সপোর্ট");
+    o.dialogBackgroundColour = col::bg;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = false;
+    if (isShowing()) o.componentToCentreAround = this;
+    auto* win = o.launchAsync();
+    juce::Component::SafePointer<juce::DialogWindow> safeWin (win);
+    juce::Component::SafePointer<StudioView> safe (this);
+    raw->onCancel = [safeWin] { if (safeWin != nullptr) safeWin->exitModalState (0); if (safeWin != nullptr) delete safeWin.getComponent(); };
+    raw->onFolder = [] { auto f = AudioEngine::appFolder().getChildFile ("Exports"); f.createDirectory(); f.revealToUser(); };
+    raw->onSave = [safe, safeWin, sel] (int choice, ExportSettings st, bool partOnly)
     {
-        if (r == 8) { auto f = AudioEngine::appFolder().getChildFile ("Exports"); f.createDirectory(); f.revealToUser(); return; }
-        if (r >= 1 && r <= 7) exportChoice (r, sel);
-    });
+        if (safeWin != nullptr) delete safeWin.getComponent();
+        if (safe == nullptr) return;
+        auto& self = *safe;
+        if (partOnly && choice == 2) choice = 7;
+        const bool video = choice == 1 || choice == 9;
+        const juce::String ext = video ? ".mp4" : choice == 6 ? ".wav" : ".mp3";
+        const juce::String suffix = choice == 3 ? u8 (" (শুধু কণ্ঠ)") : choice == 4 ? u8 (" (শুধু মিউজিক)") : (partOnly ? u8 (" (অংশ)") : juce::String());
+        auto lastDir = juce::File (self.props.getValue ("exportDir"));
+        if (! lastDir.isDirectory()) { lastDir = AudioEngine::appFolder().getChildFile ("Exports"); lastDir.createDirectory(); }
+        auto name = juce::File::createLegalFileName ((self.project.state().name.isNotEmpty() ? self.project.state().name : juce::String ("TF Vocal")) + suffix);
+        self.chooser = std::make_unique<juce::FileChooser> (u8 ("কোথায় সেভ করবেন?"), lastDir.getChildFile (name + ext), "*" + ext);
+        self.chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                                   [safe, choice, st, sel, partOnly, ext] (const juce::FileChooser& fc)
+        {
+            if (safe == nullptr) return;
+            auto f = fc.getResult();
+            if (f == juce::File()) return;
+            if (! f.hasFileExtension (ext)) f = f.withFileExtension (ext);
+            safe->props.setValue ("exportDir", f.getParentDirectory().getFullPathName());
+            safe->exportChoice (choice, partOnly ? sel : juce::Range<double>(), st, f);
+        });
+    };
 }
 
-void StudioView::exportChoice (int choice, juce::Range<double> sel)
+juce::File StudioView::cameraFor (const ProjectState& st, juce::Range<double> range, double& cameraStart) const
+{
+    // the camera recording that covers most of the exported time
+    juce::File best;
+    double bestCover = 0.0;
+    const double a = range.isEmpty() ? 0.0 : range.getStart(), b = range.isEmpty() ? st.length() : range.getEnd();
+    for (auto& t : st.tracks)
+        for (auto& c : t.clips)
+        {
+            if (c.camera == juce::File() || ! c.camera.existsAsFile()) continue;
+            const double cover = juce::jmin (b, c.end()) - juce::jmax (a, c.start);
+            if (cover > bestCover) { bestCover = cover; best = c.camera; cameraStart = c.cameraStart; }
+        }
+    return best;
+}
+
+void StudioView::exportChoice (int choice, juce::Range<double> sel, ExportSettings settings, juce::File dest)
 {
     const auto& st = project.state();
     std::vector<ExportJob> jobsList;
-    auto job = [] (ProjectState s, juce::Range<double> r, ExportFormat f, const juce::String& suffix) { return ExportJob { std::move (s), r, f, suffix }; };
+    auto job = [&settings] (ProjectState s, juce::Range<double> r, ExportFormat f, const juce::String& suffix, juce::File d)
+    {
+        ExportJob j; j.state = std::move (s); j.range = r; j.format = f; j.suffix = suffix; j.dest = d; j.settings = settings;
+        return j;
+    };
+    auto sibling = [&dest] (const juce::String& add) { return dest == juce::File() ? juce::File() : dest.getSiblingFile (dest.getFileNameWithoutExtension() + add + dest.getFileExtension()); };
     switch (choice)
     {
-        case 1: jobsList.push_back (job (st, {}, ExportFormat::mp4, {})); break;
-        case 2: jobsList.push_back (job (st, {}, ExportFormat::mp3, {})); break;
-        case 3: jobsList.push_back (job (withOnly (st, TrackKind::vocal), {}, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)"))); break;
-        case 4: jobsList.push_back (job (withOnly (st, TrackKind::music), {}, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"))); break;
-        case 5: jobsList.push_back (job (withOnly (st, TrackKind::vocal), {}, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)")));
-                jobsList.push_back (job (withOnly (st, TrackKind::music), {}, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"))); break;
-        case 6: jobsList.push_back (job (st, {}, ExportFormat::wav, {})); break;
-        case 7: jobsList.push_back (job (st, sel, ExportFormat::mp3, u8 (" (অংশ)"))); break;
+        case 1: settings.vertical = false; jobsList.push_back (job (st, sel, ExportFormat::mp4, {}, dest)); break;
+        case 9: settings.vertical = true;  jobsList.push_back (job (st, sel, ExportFormat::mp4, u8 (" (খাড়া)"), dest)); break;
+        case 2: jobsList.push_back (job (st, {}, ExportFormat::mp3, {}, dest)); break;
+        case 3: jobsList.push_back (job (withOnly (st, TrackKind::vocal), sel, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)"), dest)); break;
+        case 4: jobsList.push_back (job (withOnly (st, TrackKind::music), sel, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"), dest)); break;
+        case 5: jobsList.push_back (job (withOnly (st, TrackKind::vocal), sel, ExportFormat::mp3, u8 (" (শুধু কণ্ঠ)"), sibling (u8 (" (শুধু কণ্ঠ)"))));
+                jobsList.push_back (job (withOnly (st, TrackKind::music), sel, ExportFormat::mp3, u8 (" (শুধু মিউজিক)"), sibling (u8 (" (শুধু মিউজিক)")))); break;
+        case 6: jobsList.push_back (job (st, sel, ExportFormat::wav, {}, dest)); break;
+        case 7: jobsList.push_back (job (st, sel, ExportFormat::mp3, u8 (" (অংশ)"), dest)); break;
         default: return;
     }
     startExports (std::move (jobsList));
@@ -1275,7 +1520,10 @@ void StudioView::exportChoice (int choice, juce::Range<double> sel)
 
 void StudioView::exportRange (juce::Range<double> range, bool mp3)
 {
-    startExports ({ ExportJob { project.state(), range, mp3 ? ExportFormat::mp3 : ExportFormat::wav, range.isEmpty() ? juce::String() : u8 (" (অংশ)") } });
+    ExportJob j;
+    j.state = project.state(); j.range = range; j.format = mp3 ? ExportFormat::mp3 : ExportFormat::wav;
+    j.suffix = range.isEmpty() ? juce::String() : u8 (" (অংশ)");
+    startExports ({ j });
 }
 
 void StudioView::startExports (std::vector<ExportJob> list)
@@ -1314,7 +1562,12 @@ void StudioView::runNextExport()
     auto folder = AudioEngine::appFolder().getChildFile ("Exports");
     folder.createDirectory();
     auto name = juce::File::createLegalFileName ((project.state().name.isNotEmpty() ? project.state().name : juce::String ("TF Vocal")) + job.suffix);
-    auto wav = folder.getChildFile (name + " - " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M") + ".wav").getNonexistentSibling();
+    // the mix is rendered to a temporary WAV first (unless WAV is what was asked for)
+    juce::File wav;
+    if (job.format == ExportFormat::wav && job.dest != juce::File()) wav = job.dest;
+    else if (job.dest != juce::File()) wav = job.dest.getSiblingFile (job.dest.getFileNameWithoutExtension() + " (tmp).wav").getNonexistentSibling();
+    else wav = folder.getChildFile (name + " - " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M") + ".wav").getNonexistentSibling();
+    const auto finalOut = job.dest != juce::File() ? job.dest : wav.withFileExtension (job.format == ExportFormat::mp4 ? ".mp4" : ".mp3");
     const auto label = job.format == ExportFormat::mp4 ? u8 ("ভিডিও") : u8 ("সেভ");
     juce::Component::SafePointer<StudioView> safe (this);
 
@@ -1327,28 +1580,32 @@ void StudioView::runNextExport()
     vo.title = project.state().name;
     vo.rangeStart = job.range.isEmpty() ? 0.0 : job.range.getStart();
     vo.useSourceVideo = ! stage.hasVideo() || stage.getMode() == LyricsView::Mode::video;
+    if (job.settings.vertical) { vo.width = 720; vo.height = 1280; }
+    if (job.settings.camera) vo.camera = cameraFor (job.state, job.range, vo.cameraStart);
+    ExportOptions eo;
+    eo.fadeIn = job.settings.fadeIn;
+    eo.fadeOut = job.settings.fadeOut;
+    eo.normalise = job.settings.normalise;
 
     engine.exportMix (job.state, wav, job.range,
         [safe, label] (float p) { if (safe != nullptr) { safe->exportProgress = p; safe->saveBtn.setText (label + u8 (" হচ্ছে… ") + bn ((int) (p * (label == u8 ("ভিডিও") ? 30 : 100))) + "%"); } },
-        [safe, job, wav, vo] (bool ok, juce::String msg) mutable
+        [safe, job, wav, vo, finalOut] (bool ok, juce::String msg) mutable
         {
             if (safe == nullptr) return;
             if (! ok) { safe->exportErrors.add (msg); safe->runNextExport(); return; }
             if (job.format == ExportFormat::wav) { safe->exportedFiles.add (wav.getFullPathName()); safe->runNextExport(); return; }
 
             safe->saveBtn.setText (job.format == ExportFormat::mp4 ? u8 ("ভিডিও তৈরি হচ্ছে…") : u8 ("MP3 তৈরি হচ্ছে…"));
-            safe->jobs.addJob ([safe, job, wav, vo]() mutable
+            safe->jobs.addJob ([safe, job, wav, vo, finalOut]() mutable
             {
                 juce::String err;
-                juce::File out;
+                juce::File out = finalOut;
                 if (job.format == ExportFormat::mp3)
                 {
-                    out = wav.withFileExtension (".mp3");
                     err = media::encodeMp3 (wav, out);
                 }
                 else
                 {
-                    out = wav.withFileExtension (".mp4");
                     juce::AudioFormatManager fm; fm.registerBasicFormats();
                     if (std::unique_ptr<juce::AudioFormatReader> r { fm.createReaderFor (wav) }) vo.length = (double) r->lengthInSamples / r->sampleRate;
                     vo.mixWav = wav;
@@ -1368,7 +1625,7 @@ void StudioView::runNextExport()
                     safe->runNextExport();
                 });
             });
-        });
+        }, eo);
 }
 
 //==============================================================================
@@ -1453,10 +1710,6 @@ void StudioView::paint (juce::Graphics& g)
     auto total = engine.isRecording() ? (u8 (" ● ") + bnTime (engine.getRecordedSeconds())) : (" / " + bnTime (engine.getLength()));
     g.drawText (total, timeArea.withTrimmedLeft ((int) tw + 4), juce::Justification::centredLeft, false);
 
-    g.setColour (col::dim);
-    g.setFont (font (11.5f));
-    g.drawText ("L", meterArea.withHeight (meterArea.getHeight() / 2), juce::Justification::centredLeft);
-    g.drawText ("R", meterArea.withTrimmedTop (meterArea.getHeight() / 2), juce::Justification::centredLeft);
 }
 
 void StudioView::resized()
@@ -1488,6 +1741,10 @@ void StudioView::resized()
     };
     place (addBtn, 120);
     place (lyricsBtn, 120);
+    camBtn.setVisible (! home);
+    place (camBtn, 116);
+    pitchMeter.setVisible (! home);
+    place (pitchMeter, 230);
     if (viewVideo.isVisible())
     {
         viewWell = tools.removeFromRight (180).withSizeKeepingCentre (180, 40);
@@ -1501,16 +1758,17 @@ void StudioView::resized()
     stage.setBounds (stageCard.reduced (2).withTrimmedTop (home ? 0 : 66));
     lyricsEditor.setBounds (stageCard);
     overlay.setBounds (stageCard);
+    countIn.setBounds (stageCard.reduced (2));
 
     auto tr = transportCard.reduced (16, 10);
-    timeArea = tr.removeFromLeft (200);
-    saveBtn.setBounds (tr.removeFromRight (exportProgress >= 0 ? 190 : 176).withSizeKeepingCentre (exportProgress >= 0 ? 190 : 176, 44));
-    tr.removeFromRight (16);
-    meterArea = tr.removeFromRight (130).withSizeKeepingCentre (130, 26);
+    timeArea = tr.removeFromLeft (180);
+    saveBtn.setBounds (tr.removeFromRight (exportProgress >= 0 ? 190 : 170).withSizeKeepingCentre (exportProgress >= 0 ? 190 : 170, 44));
     tr.removeFromRight (14);
-    noiseBtn.setBounds (tr.removeFromRight (168).withSizeKeepingCentre (168, 44));
-    masterL.setBounds (meterArea.withTrimmedLeft (14).withHeight (8));
-    masterR.setBounds (meterArea.withTrimmedLeft (14).withTrimmedTop (18).withHeight (8));
+    noiseBtn.setBounds (tr.removeFromRight (128).withSizeKeepingCentre (128, 44));
+    tr.removeFromRight (14);
+    const int imW = juce::jlimit (150, 250, tr.getWidth() - 340);
+    inMeter.setBounds (tr.removeFromRight (imW).withSizeKeepingCentre (imW, 36));
+    tr.removeFromRight (10);
 
     const int groupW = 44 + 10 + 44 + 10 + 56 + 10 + 150;
     auto gr = tr.withSizeKeepingCentre (juce::jmin (groupW, tr.getWidth()), 56);
